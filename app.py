@@ -356,16 +356,28 @@ def level_2_3_signals(df: pd.DataFrame, trend_info: dict) -> tuple:
     df['ATR'] = ta.atr(df['High'], df['Low'], df['Close'], length=14)
     df['ATR_Pct'] = df['ATR'] / df['Close']
     
+    # 布林带 - 兼容不同版本的pandas_ta
     bb = ta.bbands(df['Close'], length=20, std=2.0)
-    if bb is not None:
-        df['BB_Upper'] = bb['BBU_20_2.0']
-        df['BB_Lower'] = bb['BBL_20_2.0']
-        df['BB_Mid'] = bb['BBM_20_2.0']
+    if bb is not None and not bb.empty:
+        bb_cols = bb.columns.tolist()
+        # 查找包含BBU/BBL/BBM的列名
+        bbu_col = [c for c in bb_cols if 'BBU' in c]
+        bbl_col = [c for c in bb_cols if 'BBL' in c]
+        bbm_col = [c for c in bb_cols if 'BBM' in c]
+        if bbu_col and bbl_col and bbm_col:
+            df['BB_Upper'] = bb[bbu_col[0]]
+            df['BB_Lower'] = bb[bbl_col[0]]
+            df['BB_Mid'] = bb[bbm_col[0]]
     
+    # 肯特纳通道 - 兼容不同版本
     kc = ta.kc(df['High'], df['Low'], df['Close'], length=20, scalar=1.5)
-    if kc is not None:
-        df['KC_Upper'] = kc['KCUe_20_1.5']
-        df['KC_Lower'] = kc['KCLe_20_1.5']
+    if kc is not None and not kc.empty:
+        kc_cols = kc.columns.tolist()
+        kcu_col = [c for c in kc_cols if 'KCU' in c]
+        kcl_col = [c for c in kc_cols if 'KCL' in c]
+        if kcu_col and kcl_col:
+            df['KC_Upper'] = kc[kcu_col[0]]
+            df['KC_Lower'] = kc[kcl_col[0]]
     
     df['Vol_SMA20'] = df['Volume'].rolling(20).mean()
     
