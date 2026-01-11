@@ -837,14 +837,26 @@ def main():
     with tab4:
         st.header("SpotGamma Equity Hub 分析")
         
+        # 参数设置
+        with st.expander("⚙️ 分析参数设置"):
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                near_wall_threshold = st.slider("关键位置阈值 (%)", 3, 15, 5, 
+                    help="价格距离Put Wall或Call Wall小于此值视为'接近关键位置'")
+            with col2:
+                min_options_impact = st.slider("最低Options Impact (%)", 0, 50, 20,
+                    help="过滤掉期权影响力低的标的")
+            with col3:
+                high_oi_threshold = st.slider("高OI阈值 (%)", 30, 80, 50,
+                    help="Options Impact高于此值视为'期权主导'")
+        
         uploaded_file = st.file_uploader("上传SpotGamma CSV文件", type=['csv'])
         
         if uploaded_file is not None:
             try:
                 # 读取并解析SpotGamma数据
-                # 先读取第一行判断格式
                 first_line = uploaded_file.readline().decode('utf-8')
-                uploaded_file.seek(0)  # 重置文件指针
+                uploaded_file.seek(0)
                 
                 if 'Ticker Information' in first_line:
                     sg_df = pd.read_csv(uploaded_file, skiprows=1)
@@ -860,12 +872,13 @@ def main():
                 
                 # 处理其他数值列
                 numeric_cols = ['Current Price', 'Call Wall', 'Put Wall', 'Hedge Wall', 
-                               'Options Impact', 'Gamma Ratio', 'Key Gamma Strike', 'Key Delta Strike']
+                               'Options Impact', 'Gamma Ratio', 'Key Gamma Strike', 'Key Delta Strike',
+                               'Next Exp Gamma', 'Next Exp Delta', 'Put/Call OI Ratio', 'Volume Ratio']
                 for col in numeric_cols:
                     if col in sg_df.columns:
                         sg_df[col] = pd.to_numeric(sg_df[col], errors='coerce')
                 
-                # 检查是否有必需的列
+                # 检查必需列
                 required_cols = ['Symbol', 'Current Price', 'Delta Ratio', 'Gamma Ratio', 'Put Wall', 'Call Wall']
                 missing_cols = [col for col in required_cols if col not in sg_df.columns]
                 
@@ -874,110 +887,261 @@ def main():
                     st.info("请上传包含 Delta Ratio 和 Gamma Ratio 的 SpotGamma Equity Hub 数据")
                     st.write("当前数据列:", list(sg_df.columns))
                 else:
-                    # ===== 核心分析逻辑 =====
+                    # ===== 核心分析函数 =====
+                    
+                    def get_option_structure(row):
+                        """判断期权结构"""
+                        dr = row['Delta Ratio']
+                        gr = row['Gamma Ratio']
+                        if pd.isna(dr) or pd.isna(gr):
+                            return "数据缺失", "unknown"
+                        if dr > -1 and gr < 1:
+                            return "Call主导", "call_dominant"
+                        elif dr < -3 and gr > 2:
+                            return "Put主导", "put_dominant"
+                        else:
+                            return "中性", "neutral"
+                    
+                    def get_position_zone(row, threshold):
+                        """判断价格位置"""
+                        price = row['Current Price']
+                        cw = row['Call Wall']
+                        pw = row['Put Wall']
+                        
+                        dist_to_cw = (cw - price) / price * 100
+                        dist_to_pw = (price - pw) / price * 100
+                        
+                        if dist_to_cw < threshold:
+                            return "近Call Wall", dist_to_cw, dist_to_pw
+                        elif dist_to_pw < threshold:
+                            return "近Put Wall", dist_to_cw, dist_to_pw
+                        else:
+                            return "中间区域", dist_to_cw, dist_to_pw
+                    
+                    def get_trade_signal(position, structure, options_impact, high_oi_thresh):
+                        """生成交易信号 - 位置×结构矩阵"""
+                        if options_impact > high_oi_thresh:
+                            confidence = "⭐⭐⭐"
+                        elif options_impact > high_oi_thresh * 0.6:
+                            confidence = "⭐⭐"
+                        else:
+                            confidence = "⭐"
+                        
+                        signal_matrix = {
+                            ("近Call Wall", "Call主导"): (f"🟢 突破做多 {confidence}", "突破CW后MM买股对冲，gamma squeeze向上", "bullish"),
+                            ("近Call Wall", "Put主导"): (f"🔴 压力做空 {confidence}", "CW阻力+Put主导，上攻乏力回落", "bearish"),
+                            ("近Call Wall", "中性"): ("⚪ CW观望", "阻力位，结构中性，等突破确认", "neutral"),
+                            ("近Put Wall", "Call主导"): (f"🟢 反弹做多 {confidence}", "PW支撑+Call主导，反弹动能强", "bullish"),
+                            ("近Put Wall", "Put主导"): (f"🔴 破位做空 {confidence}", "跌破PW后MM卖股对冲，gamma squeeze向下", "bearish"),
+                            ("近Put Wall", "中性"): ("⚪ PW观望", "支撑位，结构中性，等破位确认", "neutral"),
+                            ("中间区域", "Call主导"): ("🟢 偏多观察", "Call主导但未到关键位，等待时机", "bullish_watch"),
+                            ("中间区域", "Put主导"): ("🔴 偏空观察", "Put主导但未到关键位，等待时机", "bearish_watch"),
+                            ("中间区域", "中性"): ("⚪ 中性", "结构中性+位置中性，无明确方向", "neutral"),
+                        }
+                        return signal_matrix.get((position, structure), ("❓ 未知", "数据异常", "unknown"))
+                    
+                    def detect_special_risks(row, dist_to_pw, dist_to_cw):
+                        """检测特殊风险"""
+                        risks = []
+                        dr = row['Delta Ratio']
+                        vr = row.get('Volume Ratio', 1) or 1
+                        oi = row['Options Impact']
+                        hw = row.get('Hedge Wall', 0) or 0
+                        next_gamma = row.get('Next Exp Gamma', 0) or 0
+                        
+                        # 空头挤压风险：极度偏空 + 低成交量 + 接近支撑
+                        if dr < -5 and vr < 0.5 and dist_to_pw < 10:
+                            risks.append("⚠️ 空头挤压风险 (空头拥挤)")
+                        
+                        # 多头踩踏风险：偏多 + 放量 + 接近阻力
+                        if dr > -1 and vr > 1.5 and dist_to_cw < 10:
+                            risks.append("⚠️ 多头回撤风险 (获利抛压)")
+                        
+                        # Hedge Wall异常
+                        if hw <= 1:
+                            risks.append("⚠️ Hedge Wall异常")
+                        
+                        # 到期Gamma集中
+                        if next_gamma > 0.5:
+                            risks.append(f"🔴 到期风险极高 ({next_gamma*100:.0f}% Gamma)")
+                        elif next_gamma > 0.25:
+                            risks.append(f"🟠 到期风险中等 ({next_gamma*100:.0f}% Gamma)")
+                        
+                        # Options Impact极端
+                        if oi > 100:
+                            risks.append("🔴 期权完全主导")
+                        
+                        return risks
+                    
+                    def get_vol_regime(options_impact, high_thresh):
+                        """判断波动性质"""
+                        if options_impact > high_thresh:
+                            return "极高波动/期权主导", "high"
+                        elif options_impact > high_thresh * 0.6:
+                            return "中等波动/趋势型", "medium"
+                        else:
+                            return "低波动/均值回归", "low"
+                    
+                    # ===== 应用分析函数 =====
                     
                     # 计算距离
                     sg_df['Dist_to_PW_%'] = ((sg_df['Current Price'] - sg_df['Put Wall']) / sg_df['Put Wall'] * 100).round(1)
                     sg_df['Dist_to_CW_%'] = ((sg_df['Call Wall'] - sg_df['Current Price']) / sg_df['Current Price'] * 100).round(1)
                     
-                    # 信号分类函数
-                    def classify_sg_signal(row):
-                        delta = row['Delta Ratio']
-                        gamma = row['Gamma Ratio']
-                        
-                        if pd.isna(delta) or pd.isna(gamma):
-                            return '❓ 数据缺失'
-                        
-                        # 做多: Delta > -1 且 Gamma < 1
-                        if delta > -1 and gamma < 1:
-                            return '🟢 强多'
-                        elif delta > -1:
-                            return '🟢 偏多'
-                        # 做空: Delta < -3 且 Gamma > 2
-                        elif delta < -3 and gamma > 2:
-                            return '🔴 强空'
-                        elif delta < -3:
-                            return '🔴 偏空'
-                        else:
-                            return '⚪ 中性'
+                    # 期权结构
+                    structure_results = sg_df.apply(get_option_structure, axis=1)
+                    sg_df['Option_Structure'] = structure_results.apply(lambda x: x[0])
+                    sg_df['Structure_Type'] = structure_results.apply(lambda x: x[1])
                     
-                    sg_df['Signal'] = sg_df.apply(classify_sg_signal, axis=1)
+                    # 价格位置
+                    position_results = sg_df.apply(lambda row: get_position_zone(row, near_wall_threshold), axis=1)
+                    sg_df['Price_Position'] = position_results.apply(lambda x: x[0])
+                    sg_df['Dist_CW_Calc'] = position_results.apply(lambda x: x[1])
+                    sg_df['Dist_PW_Calc'] = position_results.apply(lambda x: x[2])
                     
-                    # 风险提示
-                    def get_risk_alert(row):
-                        alerts = []
-                        if row['Options Impact'] > 50:
-                            alerts.append('⚠️高OI')
-                        if row['Dist_to_PW_%'] < 10:
-                            alerts.append('⚠️近PW')
-                        if row['Dist_to_CW_%'] < 5:
-                            alerts.append('📍近CW')
-                        return ' '.join(alerts)
+                    # 交易信号
+                    signal_results = sg_df.apply(
+                        lambda row: get_trade_signal(row['Price_Position'], row['Option_Structure'], 
+                                                     row['Options Impact'], high_oi_threshold), axis=1)
+                    sg_df['Trade_Signal'] = signal_results.apply(lambda x: x[0])
+                    sg_df['Signal_Logic'] = signal_results.apply(lambda x: x[1])
+                    sg_df['Signal_Type'] = signal_results.apply(lambda x: x[2])
                     
-                    sg_df['Risk_Alert'] = sg_df.apply(get_risk_alert, axis=1)
+                    # 特殊风险
+                    sg_df['Special_Risks'] = sg_df.apply(
+                        lambda row: detect_special_risks(row, row['Dist_PW_Calc'], row['Dist_CW_Calc']), axis=1)
+                    
+                    # 波动性质
+                    vol_results = sg_df['Options Impact'].apply(lambda x: get_vol_regime(x, high_oi_threshold))
+                    sg_df['Vol_Regime'] = vol_results.apply(lambda x: x[0])
+                    
+                    # 过滤低OI标的
+                    sg_filtered = sg_df[sg_df['Options Impact'] >= min_options_impact].copy()
                     
                     # ===== 显示统计 =====
-                    st.subheader("📊 信号统计")
-                    signal_counts = sg_df['Signal'].value_counts()
+                    st.subheader("📊 分析概览")
                     
-                    cols = st.columns(5)
-                    signal_types = ['🟢 强多', '🟢 偏多', '⚪ 中性', '🔴 偏空', '🔴 强空']
-                    for i, sig in enumerate(signal_types):
-                        with cols[i]:
-                            count = signal_counts.get(sig, 0)
-                            st.metric(sig, count)
+                    # 统计各类信号
+                    col1, col2, col3, col4 = st.columns(4)
                     
-                    # ===== 做多候选 =====
-                    st.subheader("🟢 做多候选 (Delta Ratio > -1 且 Gamma Ratio < 1)")
-                    bullish = sg_df[(sg_df['Delta Ratio'] > -1) & (sg_df['Gamma Ratio'] < 1)].copy()
-                    bullish = bullish.sort_values('Delta Ratio', ascending=False)
+                    bullish_count = len(sg_filtered[sg_filtered['Signal_Type'] == 'bullish'])
+                    bearish_count = len(sg_filtered[sg_filtered['Signal_Type'] == 'bearish'])
+                    watch_bull = len(sg_filtered[sg_filtered['Signal_Type'] == 'bullish_watch'])
+                    watch_bear = len(sg_filtered[sg_filtered['Signal_Type'] == 'bearish_watch'])
                     
-                    if len(bullish) > 0:
-                        display_cols = ['Symbol', 'Current Price', 'Delta Ratio', 'Gamma Ratio', 
-                                       'Put Wall', 'Call Wall', 'Dist_to_CW_%', 'Options Impact']
-                        st.dataframe(bullish[display_cols].round(2), use_container_width=True, hide_index=True)
+                    with col1:
+                        st.metric("🟢 高确信做多", bullish_count)
+                    with col2:
+                        st.metric("🔴 高确信做空", bearish_count)
+                    with col3:
+                        st.metric("🟢 偏多观察", watch_bull)
+                    with col4:
+                        st.metric("🔴 偏空观察", watch_bear)
+                    
+                    # 期权结构分布
+                    st.caption(f"已分析 {len(sg_filtered)} 只标的 (Options Impact ≥ {min_options_impact}%)")
+                    
+                    structure_counts = sg_filtered['Option_Structure'].value_counts()
+                    position_counts = sg_filtered['Price_Position'].value_counts()
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.markdown("**期权结构分布:**")
+                        for struct, count in structure_counts.items():
+                            st.write(f"  {struct}: {count}")
+                    with col2:
+                        st.markdown("**价格位置分布:**")
+                        for pos, count in position_counts.items():
+                            st.write(f"  {pos}: {count}")
+                    
+                    # ===== 🟢 高确信做多信号 =====
+                    st.subheader("🟢 高确信做多信号")
+                    st.caption("位置×结构: 近CW+Call主导=突破做多 | 近PW+Call主导=反弹做多")
+                    
+                    bullish_signals = sg_filtered[sg_filtered['Signal_Type'] == 'bullish'].copy()
+                    bullish_signals = bullish_signals.sort_values('Options Impact', ascending=False)
+                    
+                    if len(bullish_signals) > 0:
+                        for _, row in bullish_signals.iterrows():
+                            risks = row['Special_Risks']
+                            risk_str = ' | '.join(risks) if risks else ''
+                            
+                            with st.container():
+                                col1, col2 = st.columns([1, 2])
+                                with col1:
+                                    st.markdown(f"**{row['Symbol']}** ${row['Current Price']:.2f}")
+                                    st.caption(f"{row['Trade_Signal']}")
+                                with col2:
+                                    st.markdown(f"""
+                                    - **位置**: {row['Price_Position']} | **结构**: {row['Option_Structure']}
+                                    - DR: {row['Delta Ratio']:.2f} | GR: {row['Gamma Ratio']:.2f} | OI: {row['Options Impact']:.1f}%
+                                    - PW: {row['Put Wall']} → 现价 → CW: {row['Call Wall']}
+                                    - 逻辑: {row['Signal_Logic']}
+                                    {f'- **风险**: {risk_str}' if risk_str else ''}
+                                    """)
+                                st.divider()
+                    else:
+                        st.info("无高确信做多信号")
+                    
+                    # ===== 🔴 高确信做空信号 =====
+                    st.subheader("🔴 高确信做空信号")
+                    st.caption("位置×结构: 近CW+Put主导=压力做空 | 近PW+Put主导=破位做空")
+                    
+                    bearish_signals = sg_filtered[sg_filtered['Signal_Type'] == 'bearish'].copy()
+                    bearish_signals = bearish_signals.sort_values('Options Impact', ascending=False)
+                    
+                    if len(bearish_signals) > 0:
+                        for _, row in bearish_signals.iterrows():
+                            risks = row['Special_Risks']
+                            risk_str = ' | '.join(risks) if risks else ''
+                            
+                            with st.container():
+                                col1, col2 = st.columns([1, 2])
+                                with col1:
+                                    st.markdown(f"**{row['Symbol']}** ${row['Current Price']:.2f}")
+                                    st.caption(f"{row['Trade_Signal']}")
+                                with col2:
+                                    st.markdown(f"""
+                                    - **位置**: {row['Price_Position']} | **结构**: {row['Option_Structure']}
+                                    - DR: {row['Delta Ratio']:.2f} | GR: {row['Gamma Ratio']:.2f} | OI: {row['Options Impact']:.1f}%
+                                    - PW: {row['Put Wall']} → 现价 → CW: {row['Call Wall']}
+                                    - 逻辑: {row['Signal_Logic']}
+                                    {f'- **风险**: {risk_str}' if risk_str else ''}
+                                    """)
+                                st.divider()
+                    else:
+                        st.info("无高确信做空信号")
+                    
+                    # ===== 观察名单 =====
+                    with st.expander("👀 观察名单（等待接近关键位置）"):
+                        watch_signals = sg_filtered[sg_filtered['Signal_Type'].isin(['bullish_watch', 'bearish_watch'])].copy()
+                        watch_signals = watch_signals.sort_values('Options Impact', ascending=False)
                         
-                        best = bullish.iloc[0]
-                        st.success(f"🏆 首选做多: **{best['Symbol']}** | 现价: ${best['Current Price']:.2f} | "
-                                  f"DR: {best['Delta Ratio']:.2f} | GR: {best['Gamma Ratio']:.2f} | "
-                                  f"支撑: {best['Put Wall']} | 目标: {best['Call Wall']}")
-                    else:
-                        st.info("无符合条件的做多标的")
+                        if len(watch_signals) > 0:
+                            display_cols = ['Symbol', 'Current Price', 'Trade_Signal', 'Price_Position', 
+                                          'Option_Structure', 'Delta Ratio', 'Gamma Ratio', 'Options Impact',
+                                          'Put Wall', 'Call Wall']
+                            st.dataframe(watch_signals[display_cols].round(2), use_container_width=True, hide_index=True)
+                        else:
+                            st.info("无观察标的")
                     
-                    # ===== 做空候选 =====
-                    st.subheader("🔴 做空候选 (Delta Ratio < -3 且 Gamma Ratio > 2)")
-                    bearish = sg_df[(sg_df['Delta Ratio'] < -3) & (sg_df['Gamma Ratio'] > 2)].copy()
-                    bearish = bearish.sort_values('Dist_to_PW_%', ascending=True)
-                    
-                    if len(bearish) > 0:
-                        display_cols = ['Symbol', 'Current Price', 'Delta Ratio', 'Gamma Ratio',
-                                       'Put Wall', 'Dist_to_PW_%', 'Options Impact']
-                        st.dataframe(bearish[display_cols].round(2), use_container_width=True, hide_index=True)
-                        
-                        best = bearish.iloc[0]
-                        st.error(f"🏆 首选做空: **{best['Symbol']}** (距PW最近) | 现价: ${best['Current Price']:.2f} | "
-                                f"DR: {best['Delta Ratio']:.2f} | GR: {best['Gamma Ratio']:.2f} | "
-                                f"Put Wall: {best['Put Wall']} (距离 {best['Dist_to_PW_%']:.1f}%)")
-                    else:
-                        st.info("无符合条件的做空标的")
-                    
-                    # ===== 高波动警告 =====
-                    st.subheader("⚠️ 高波动标的 (Options Impact > 50%)")
-                    high_vol = sg_df[sg_df['Options Impact'] > 50].sort_values('Options Impact', ascending=False)
-                    
-                    if len(high_vol) > 0:
-                        display_cols = ['Symbol', 'Current Price', 'Options Impact', 'Delta Ratio', 'Gamma Ratio', 'Signal']
-                        st.dataframe(high_vol[display_cols].round(2), use_container_width=True, hide_index=True)
-                    else:
-                        st.info("无高波动标的")
+                    # ===== 特殊风险警告 =====
+                    with st.expander("⚠️ 特殊风险警告"):
+                        risky = sg_filtered[sg_filtered['Special_Risks'].apply(len) > 0].copy()
+                        if len(risky) > 0:
+                            for _, row in risky.iterrows():
+                                st.markdown(f"**{row['Symbol']}**: {' | '.join(row['Special_Risks'])}")
+                        else:
+                            st.info("无特殊风险")
                     
                     # ===== 完整分析表 =====
                     with st.expander("📋 查看完整分析表"):
-                        full_cols = ['Symbol', 'Current Price', 'Signal', 'Delta Ratio', 'Gamma Ratio',
+                        full_cols = ['Symbol', 'Current Price', 'Trade_Signal', 'Price_Position', 
+                                    'Option_Structure', 'Delta Ratio', 'Gamma Ratio',
                                     'Put Wall', 'Call Wall', 'Dist_to_PW_%', 'Dist_to_CW_%', 
-                                    'Options Impact', 'Risk_Alert']
-                        available_cols = [c for c in full_cols if c in sg_df.columns]
-                        df_sorted = sg_df.sort_values('Delta Ratio', ascending=False)
+                                    'Options Impact', 'Vol_Regime']
+                        available_cols = [c for c in full_cols if c in sg_filtered.columns]
+                        df_sorted = sg_filtered.sort_values('Options Impact', ascending=False)
                         st.dataframe(df_sorted[available_cols].round(2), use_container_width=True, hide_index=True)
                     
                     # ===== 交叉验证 =====
@@ -988,207 +1152,109 @@ def main():
                         passed_tickers = watchlist[watchlist['passed'] == True]['ticker'].tolist()
                         
                         # 找出同时在两个名单中的股票
-                        sg_tickers = sg_df['Symbol'].tolist()
+                        sg_tickers = sg_filtered['Symbol'].tolist()
                         overlap = [t for t in sg_tickers if t in passed_tickers]
                         
                         if overlap:
                             st.success(f"✅ 同时出现在两个名单: **{', '.join(overlap)}**")
                             
                             for ticker in overlap:
-                                sg_row = sg_df[sg_df['Symbol'] == ticker].iloc[0]
+                                sg_row = sg_filtered[sg_filtered['Symbol'] == ticker].iloc[0]
                                 stock_row = watchlist[watchlist['ticker'] == ticker].iloc[0]
                                 
                                 # 判断信号是否一致
                                 tech_direction = stock_row['direction']
-                                sg_signal = sg_row['Signal']
+                                sg_signal = sg_row['Trade_Signal']
+                                sg_type = sg_row['Signal_Type']
                                 
-                                if ('多' in tech_direction and '多' in sg_signal) or \
-                                   ('空' in tech_direction and '空' in sg_signal):
+                                # 方向一致性判断
+                                tech_bullish = '多' in tech_direction
+                                tech_bearish = '空' in tech_direction
+                                sg_bullish = sg_type in ['bullish', 'bullish_watch']
+                                sg_bearish = sg_type in ['bearish', 'bearish_watch']
+                                
+                                if (tech_bullish and sg_bullish) or (tech_bearish and sg_bearish):
                                     consistency = "✅ 方向一致"
-                                    box_color = "success"
-                                elif '中性' in sg_signal:
+                                elif sg_type == 'neutral':
                                     consistency = "⚪ Gamma中性"
-                                    box_color = "info"
                                 else:
                                     consistency = "⚠️ 方向冲突"
-                                    box_color = "warning"
+                                
+                                risks = sg_row['Special_Risks']
+                                risk_str = ' | '.join(risks) if risks else ''
                                 
                                 with st.container():
                                     st.markdown(f"""
                                     ---
                                     **{ticker}** - {consistency}
                                     - 技术信号: {tech_direction} | 评分: {stock_row['score']} | {' '.join(stock_row['signals'])}
-                                    - Gamma信号: {sg_signal} | DR: {sg_row['Delta Ratio']:.2f} | GR: {sg_row['Gamma Ratio']:.2f}
-                                    - Put Wall: {sg_row['Put Wall']} | Call Wall: {sg_row['Call Wall']}
-                                    - Options Impact: {sg_row['Options Impact']:.1f}%
+                                    - Gamma信号: {sg_signal}
+                                    - 位置: {sg_row['Price_Position']} | 结构: {sg_row['Option_Structure']}
+                                    - DR: {sg_row['Delta Ratio']:.2f} | GR: {sg_row['Gamma Ratio']:.2f} | OI: {sg_row['Options Impact']:.1f}%
+                                    - PW: {sg_row['Put Wall']} | CW: {sg_row['Call Wall']}
+                                    {f'- **风险**: {risk_str}' if risk_str else ''}
                                     """)
                         else:
                             st.info("无重叠股票。技术筛选名单中的股票未出现在SpotGamma数据中。")
                     else:
                         st.info("💡 提示：先在「个股筛选」Tab完成筛选，可进行交叉验证")
                     
-                    # ===== 交易信号分析（位置×期权结构矩阵）=====
-                    st.subheader("🎯 交易信号分析")
-                    
-                    # 定义期权结构
-                    def get_option_structure(row):
-                        dr = row['Delta Ratio']
-                        gr = row['Gamma Ratio']
-                        if dr > -1 and gr < 1:
-                            return 'Call主导'
-                        elif dr < -3 and gr > 2:
-                            return 'Put主导'
-                        else:
-                            return '中性'
-                    
-                    # 定义价格位置
-                    def get_price_position(row):
-                        dist_cw = row['Dist_to_CW_%']
-                        dist_pw = row['Dist_to_PW_%']
-                        if dist_cw < 5:
-                            return '近Call Wall'
-                        elif dist_pw < 10:
-                            return '近Put Wall'
-                        else:
-                            return '中间区域'
-                    
-                    # 生成交易信号
-                    def generate_trade_signal(row):
-                        structure = row['Option_Structure']
-                        position = row['Price_Position']
-                        oi = row['Options Impact']
-                        
-                        # 高OI = 高置信度
-                        confidence = '⭐⭐⭐' if oi > 50 else ('⭐⭐' if oi > 30 else '⭐')
-                        
-                        # 位置 × 结构 矩阵
-                        if position == '近Call Wall':
-                            if structure == 'Call主导':
-                                return f'🟢 突破做多 {confidence}', '突破CW后gamma squeeze向上', 'bullish'
-                            elif structure == 'Put主导':
-                                return f'🔴 压力做空 {confidence}', 'CW阻力+Put主导，回落概率高', 'bearish'
-                            else:
-                                return '⚪ 观望', 'CW阻力，结构中性', 'neutral'
-                        
-                        elif position == '近Put Wall':
-                            if structure == 'Call主导':
-                                return f'🟢 反弹做多 {confidence}', 'PW支撑+Call主导，反弹动能强', 'bullish'
-                            elif structure == 'Put主导':
-                                return f'🔴 破位做空 {confidence}', '跌破PW后gamma squeeze向下', 'bearish'
-                            else:
-                                return '⚪ 观望', 'PW支撑，但结构中性', 'neutral'
-                        
-                        else:  # 中间区域
-                            if structure == 'Call主导':
-                                return '🟢 偏多观察', '等待回调至PW或突破CW', 'bullish_watch'
-                            elif structure == 'Put主导':
-                                return '🔴 偏空观察', '等待反弹至CW或跌破PW', 'bearish_watch'
-                            else:
-                                return '⚪ 中性', '无明确方向', 'neutral'
-                    
-                    sg_df['Option_Structure'] = sg_df.apply(get_option_structure, axis=1)
-                    sg_df['Price_Position'] = sg_df.apply(get_price_position, axis=1)
-                    
-                    signal_results = sg_df.apply(generate_trade_signal, axis=1)
-                    sg_df['Trade_Signal'] = signal_results.apply(lambda x: x[0])
-                    sg_df['Signal_Logic'] = signal_results.apply(lambda x: x[1])
-                    sg_df['Signal_Type'] = signal_results.apply(lambda x: x[2])
-                    
-                    # ===== 高确信做多信号 =====
-                    st.markdown("#### 🟢 高确信做多")
-                    bullish_signals = sg_df[sg_df['Signal_Type'] == 'bullish'].copy()
-                    bullish_signals = bullish_signals.sort_values('Options Impact', ascending=False)
-                    
-                    if len(bullish_signals) > 0:
-                        for _, row in bullish_signals.iterrows():
-                            with st.container():
-                                col1, col2 = st.columns([1, 2])
-                                with col1:
-                                    st.markdown(f"**{row['Symbol']}** ${row['Current Price']:.2f}")
-                                    st.caption(f"{row['Trade_Signal']}")
-                                with col2:
-                                    st.markdown(f"""
-                                    - 位置: {row['Price_Position']} | 结构: {row['Option_Structure']}
-                                    - DR: {row['Delta Ratio']:.2f} | GR: {row['Gamma Ratio']:.2f} | OI: {row['Options Impact']:.1f}%
-                                    - PW: {row['Put Wall']} | CW: {row['Call Wall']}
-                                    - 逻辑: {row['Signal_Logic']}
-                                    """)
-                                st.divider()
-                    else:
-                        st.info("无高确信做多信号")
-                    
-                    # ===== 高确信做空信号 =====
-                    st.markdown("#### 🔴 高确信做空")
-                    bearish_signals = sg_df[sg_df['Signal_Type'] == 'bearish'].copy()
-                    bearish_signals = bearish_signals.sort_values('Options Impact', ascending=False)
-                    
-                    if len(bearish_signals) > 0:
-                        for _, row in bearish_signals.iterrows():
-                            with st.container():
-                                col1, col2 = st.columns([1, 2])
-                                with col1:
-                                    st.markdown(f"**{row['Symbol']}** ${row['Current Price']:.2f}")
-                                    st.caption(f"{row['Trade_Signal']}")
-                                with col2:
-                                    st.markdown(f"""
-                                    - 位置: {row['Price_Position']} | 结构: {row['Option_Structure']}
-                                    - DR: {row['Delta Ratio']:.2f} | GR: {row['Gamma Ratio']:.2f} | OI: {row['Options Impact']:.1f}%
-                                    - PW: {row['Put Wall']} | CW: {row['Call Wall']}
-                                    - 逻辑: {row['Signal_Logic']}
-                                    """)
-                                st.divider()
-                    else:
-                        st.info("无高确信做空信号")
-                    
-                    # ===== 观察名单 =====
-                    with st.expander("👀 观察名单（偏多/偏空但未到关键位置）"):
-                        watch_signals = sg_df[sg_df['Signal_Type'].isin(['bullish_watch', 'bearish_watch'])].copy()
-                        if len(watch_signals) > 0:
-                            display_cols = ['Symbol', 'Current Price', 'Trade_Signal', 'Price_Position', 
-                                          'Option_Structure', 'Delta Ratio', 'Gamma Ratio', 'Options Impact']
-                            st.dataframe(watch_signals[display_cols].round(2), use_container_width=True, hide_index=True)
-                        else:
-                            st.info("无观察标的")
-                    
                     # ===== 交易计划 =====
-                    with st.expander("📈 生成交易计划"):
+                    st.subheader("📈 交易计划")
+                    
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
                         st.markdown("### 🟢 做多计划")
                         if len(bullish_signals) > 0:
                             for _, row in bullish_signals.head(5).iterrows():
                                 if row['Price_Position'] == '近Call Wall':
-                                    # 突破做多：入场在CW附近，止损在CW下方
-                                    entry = f"突破{row['Call Wall']:.0f}确认"
+                                    entry = f"突破 {row['Call Wall']:.0f} 确认"
                                     stop = f"{row['Call Wall'] * 0.97:.0f}"
                                     target = f"{row['Call Wall'] * 1.05:.0f}+"
                                     strategy = "突破追多"
                                 else:  # 近Put Wall - 反弹做多
-                                    entry = f"{row['Put Wall']:.0f}-{row['Current Price']:.0f}"
+                                    entry = f"{row['Put Wall']:.0f} - {row['Current Price']:.0f}"
                                     stop = f"{row['Put Wall'] * 0.97:.0f}"
                                     target = f"{row['Call Wall']:.0f}"
                                     strategy = "支撑反弹"
                                 
-                                st.markdown(f"- **{row['Symbol']}** [{strategy}]: 入场 {entry} | 止损 {stop} | 目标 {target} | OI:{row['Options Impact']:.0f}%")
+                                st.markdown(f"""
+                                **{row['Symbol']}** [{strategy}]
+                                - 入场: {entry}
+                                - 止损: {stop}
+                                - 目标: {target}
+                                - OI: {row['Options Impact']:.0f}%
+                                """)
+                                st.divider()
                         else:
-                            st.write("无")
-                        
+                            st.info("无高确信做多信号")
+                    
+                    with col2:
                         st.markdown("### 🔴 做空计划")
                         if len(bearish_signals) > 0:
                             for _, row in bearish_signals.head(5).iterrows():
                                 if row['Price_Position'] == '近Put Wall':
-                                    # 破位做空：入场在PW附近，止损在PW上方
-                                    entry = f"跌破{row['Put Wall']:.0f}确认"
+                                    entry = f"跌破 {row['Put Wall']:.0f} 确认"
                                     stop = f"{row['Put Wall'] * 1.03:.0f}"
                                     target = f"{row['Put Wall'] * 0.95:.0f}-"
                                     strategy = "破位追空"
                                 else:  # 近Call Wall - 压力做空
-                                    entry = f"{row['Current Price']:.0f}-{row['Call Wall']:.0f}"
+                                    entry = f"{row['Current Price']:.0f} - {row['Call Wall']:.0f}"
                                     stop = f"{row['Call Wall'] * 1.03:.0f}"
                                     target = f"{row['Put Wall']:.0f}"
                                     strategy = "阻力回落"
                                 
-                                st.markdown(f"- **{row['Symbol']}** [{strategy}]: 入场 {entry} | 止损 {stop} | 目标 {target} | OI:{row['Options Impact']:.0f}%")
+                                st.markdown(f"""
+                                **{row['Symbol']}** [{strategy}]
+                                - 入场: {entry}
+                                - 止损: {stop}
+                                - 目标: {target}
+                                - OI: {row['Options Impact']:.0f}%
+                                """)
+                                st.divider()
                         else:
-                            st.write("无")
+                            st.info("无高确信做空信号")
                         
             except Exception as e:
                 st.error(f"读取文件失败: {e}")
@@ -1207,7 +1273,7 @@ def main():
         
         ---
         
-        **信号说明:**
+        **技术信号说明:**
         - 🟢 多头回调买点
         - 🔵 超卖 / 反转
         - 🔴 空头反弹做空
@@ -1221,24 +1287,28 @@ def main():
         - 🌬️ 顺风 = 信号方向与板块资金流一致
         - 🌪️ 逆风 = 信号方向与板块资金流相反
         
-        顺风置信度更高，逆风需谨慎。
+        ---
+        
+        **SpotGamma 位置×结构矩阵:**
+        
+        | 位置 | Call主导 | Put主导 |
+        |------|----------|---------|
+        | 近CW | 🟢突破做多 | 🔴压力做空 |
+        | 近PW | 🟢反弹做多 | 🔴破位做空 |
+        | 中间 | 观察 | 观察 |
         
         ---
         
-        **SpotGamma指标:**
-        - **Delta Ratio** = Put Delta ÷ Call Delta
-          - > -1: 偏多 (Call Delta主导)
-          - < -3: 偏空 (Put Delta主导)
+        **期权结构判断:**
+        - **Call主导**: DR > -1 且 GR < 1
+        - **Put主导**: DR < -3 且 GR > 2
         
-        - **Gamma Ratio** = Put Gamma ÷ Call Gamma
-          - < 1: 上涨加速 (Call Gamma主导)
-          - > 2: 下跌加速 (Put Gamma主导)
+        ---
         
-        - **做多条件**: DR > -1 且 GR < 1
-        - **做空条件**: DR < -3 且 GR > 2
-        
-        - **Put Wall**: 条件性支撑（破位后加速下跌）
-        - **Call Wall**: 条件性阻力（突破后加速上涨）
+        **MM对冲机制:**
+        - 近CW + Call主导 → 突破后MM买股对冲 → Squeeze↑
+        - 近PW + Put主导 → 破位后MM卖股对冲 → Squeeze↓
+        - 高Options Impact → 期权主导，信号更强
         """)
 
 
