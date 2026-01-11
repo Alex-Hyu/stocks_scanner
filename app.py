@@ -1007,10 +1007,21 @@ def main():
                         next_gamma = row.get('Next Exp Gamma', None)
                         next_delta = row.get('Next Exp Delta', None)
                         
-                        # 1. Volume Ratio反弹潜力（官方：高VR表示ATM Put集中，到期后反弹）
-                        if vr is not None and not pd.isna(vr):
-                            if vr > 1.5 and dist_to_pw < 10:
-                                signals.append(("⚡ 到期反弹潜力", "ATM Put集中，到期后MM平空头对冲→推动反弹", "bounce"))
+                        # 1. 到期反弹潜力（4个条件必须同时满足）
+                        # 条件1: Volume Ratio高（ATM Put活跃）
+                        # 条件2: Delta Ratio偏Put（Put Delta占优）
+                        # 条件3: 临近到期（大量Gamma即将释放）
+                        # 条件4: 价格高于Put密集区（Put可能到期OTM）
+                        # 逻辑：MM short put→正Delta→卖股票对冲→到期后买回股票平仓→反弹
+                        if (vr is not None and not pd.isna(vr) and vr > 1.5 and  # 条件1
+                            dr < -3 and  # 条件2: Put Delta占优
+                            next_gamma is not None and not pd.isna(next_gamma) and next_gamma > 0.25 and  # 条件3
+                            dist_to_pw > 5):  # 条件4: 价格高于Put密集区
+                            signals.append((
+                                "⚡ 到期反弹潜力", 
+                                f"MM short put持有空头股票对冲，到期后买回平仓→反弹 | VR={vr:.1f} DR={dr:.1f} NextGamma={next_gamma*100:.0f}%",
+                                "bounce"
+                            ))
                         
                         # 2. Next Exp Gamma风险（官方：>25%集中，到期前后剧烈波动）
                         if next_gamma is not None and not pd.isna(next_gamma):
@@ -1019,12 +1030,12 @@ def main():
                             elif next_gamma > 0.25:
                                 signals.append(("🟠 Gamma集中警告", f"{next_gamma*100:.0f}%将在下次到期释放（官方警戒线25%）", "gamma_risk_medium"))
                         
-                        # 3. 空头挤压风险
-                        if dr < -5 and (vr is None or vr < 0.5) and dist_to_pw < 10:
+                        # 3. 空头挤压风险（极度偏空+低成交+近支撑）
+                        if dr < -5 and (vr is None or pd.isna(vr) or vr < 0.5) and dist_to_pw < 10:
                             signals.append(("⚠️ 空头挤压风险", "极度偏空+低成交+近支撑→空头拥挤，逆势反弹风险", "short_squeeze"))
                         
-                        # 4. 多头踩踏风险
-                        if dr > -1 and vr is not None and vr > 1.5 and dist_to_cw < 10:
+                        # 4. 多头踩踏风险（偏多+放量+近阻力）
+                        if dr > -1 and vr is not None and not pd.isna(vr) and vr > 1.5 and dist_to_cw < 10:
                             signals.append(("⚠️ 多头回撤风险", "偏多+放量+近阻力→获利盘抛压", "long_liquidation"))
                         
                         # 5. Delta Ratio与P/C OI一致性验证
@@ -1037,6 +1048,25 @@ def main():
                         # 6. Options Impact极端
                         if oi > 100:
                             signals.append(("🔴 期权完全主导", f"OI={oi:.0f}%，股价完全由期权流驱动", "oi_extreme"))
+                        
+                        # 7. 高Volume Ratio但条件不完整时的提示
+                        if (vr is not None and not pd.isna(vr) and vr > 1.5):
+                            # 检查是否已经触发了反弹信号
+                            has_bounce = any(s[2] == 'bounce' for s in signals)
+                            if not has_bounce:
+                                missing = []
+                                if dr >= -3:
+                                    missing.append("DR未偏Put")
+                                if next_gamma is None or pd.isna(next_gamma) or next_gamma <= 0.25:
+                                    missing.append("Gamma未集中")
+                                if dist_to_pw <= 5:
+                                    missing.append("太近PW")
+                                if missing:
+                                    signals.append((
+                                        "📊 高VR观察", 
+                                        f"ATM Put活跃(VR={vr:.1f})，但缺少: {', '.join(missing)}",
+                                        "vr_watch"
+                                    ))
                         
                         return signals
                     
@@ -1469,25 +1499,48 @@ def main():
         
         with st.expander("⚡ 特殊信号说明"):
             st.markdown("""
-            **到期反弹潜力:**
-            - 高Volume Ratio + 近Put Wall
-            - ATM Put集中，到期后MM平空头对冲→推动反弹
+            **到期反弹潜力（4个条件必须同时满足）:**
+            1. Volume Ratio > 1.5（ATM Put活跃）
+            2. Delta Ratio < -3（Put Delta占优）
+            3. Next Exp Gamma > 25%（临近到期）
+            4. 价格高于Put Wall 5%以上（Put可能到期OTM）
+            
+            **逻辑链条:**
+            ```
+            大量ATM Put活跃
+                ↓
+            MM作为对手方Short Put
+                ↓
+            Short Put = 正Delta敞口
+                ↓
+            MM卖出股票对冲（持有空头）
+                ↓
+            到期时Put无价值（OTM）
+                ↓
+            MM买回股票平仓
+                ↓
+            买盘 → 反弹！
+            ```
+            
+            ⚠️ 高VR本身不代表方向，必须联合其他指标判断
+            
+            ---
+            
+            **MM对冲方向速查:**
+            | MM持仓 | Delta敞口 | 对冲 | 到期平仓 |
+            |--------|----------|------|---------|
+            | Short Call | 负 | 买股 | 卖股(压力) |
+            | Short Put | 正 | 卖股 | 买股(反弹) |
+            
+            ---
             
             **Gamma集中风险:**
             - Next Exp Gamma > 25%（官方警戒线）
-            - 到期前后容易出现剧烈波动或方向转变
+            - 到期前后容易剧烈波动或方向转变
             
-            **空头挤压风险:**
-            - DR < -5 + 低成交量 + 近Put Wall
-            - 空头过度拥挤，逆势反弹风险
-            
-            **多头踩踏风险:**
-            - DR > -1 + 放量 + 近Call Wall
-            - 获利盘抛压，回撤风险
-            
-            **指标分歧:**
-            - Delta Ratio与P/C OI Ratio方向不一致
-            - 需要更多确认，谨慎交易
+            **空头挤压/多头踩踏:**
+            - 空头挤压: DR<-5 + 低成交 + 近PW
+            - 多头踩踏: DR>-1 + 放量 + 近CW
             """)
 
 
