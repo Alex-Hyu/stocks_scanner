@@ -1006,20 +1006,46 @@ def main():
                         pc_oi = row.get('Put/Call OI Ratio', None)
                         next_gamma = row.get('Next Exp Gamma', None)
                         next_delta = row.get('Next Exp Delta', None)
+                        price = row['Current Price']
+                        hw = row.get('Hedge Wall', None)
+                        pw = row['Put Wall']
                         
-                        # 1. 到期反弹潜力（4个条件必须同时满足）
-                        # 条件1: Volume Ratio高（ATM Put活跃）
-                        # 条件2: Delta Ratio偏Put（Put Delta占优）
-                        # 条件3: 临近到期（大量Gamma即将释放）
-                        # 条件4: 价格高于Put密集区（Put可能到期OTM）
+                        # 计算距离Hedge Wall的距离
+                        dist_to_hw = None
+                        if hw is not None and not pd.isna(hw) and hw > 1:
+                            dist_to_hw = ((price - hw) / price) * 100
+                        
+                        # 0. Gamma陷阱警告（跌破Put Wall + 大量Gamma即将释放）
+                        # 做市商正在连环抛售，千万不要抄底！
+                        if (dist_to_pw < 0 and  # 已跌破Put Wall
+                            next_gamma is not None and not pd.isna(next_gamma) and next_gamma > 0.25):
+                            signals.append((
+                                "💀 Gamma陷阱", 
+                                f"已跌破PW且{next_gamma*100:.0f}%Gamma待释放，MM连环抛售中，勿抄底！",
+                                "gamma_trap"
+                            ))
+                        
+                        # 1. 到期反弹潜力（4个条件 + Gamma环境修正）
                         # 逻辑：MM short put→正Delta→卖股票对冲→到期后买回股票平仓→反弹
-                        if (vr is not None and not pd.isna(vr) and vr > 1.5 and  # 条件1
+                        elif (vr is not None and not pd.isna(vr) and vr > 1.2 and  # 条件1: 降低到1.2
                             dr < -3 and  # 条件2: Put Delta占优
                             next_gamma is not None and not pd.isna(next_gamma) and next_gamma > 0.25 and  # 条件3
-                            dist_to_pw > 5):  # 条件4: 价格高于Put密集区
+                            dist_to_pw > 2):  # 条件4: 降低到2%，蓝筹股5%已是巨大回撤
+                            
+                            # 判断Gamma环境（基于Hedge Wall）
+                            if dist_to_hw is not None and dist_to_hw > 0:
+                                regime = "正Gamma区"
+                                regime_note = "价格>HW，均值回归环境，反弹更稳健"
+                            elif dist_to_hw is not None:
+                                regime = "负Gamma区"
+                                regime_note = "价格<HW，高波动环境，反弹可能剧烈但风险更高"
+                            else:
+                                regime = "未知环境"
+                                regime_note = "Hedge Wall数据缺失"
+                            
                             signals.append((
-                                "⚡ 到期反弹潜力", 
-                                f"MM short put持有空头股票对冲，到期后买回平仓→反弹 | VR={vr:.1f} DR={dr:.1f} NextGamma={next_gamma*100:.0f}%",
+                                f"⚡ 到期反弹【{regime}】", 
+                                f"MM short put持空头股票对冲，到期后买回→反弹 | {regime_note} | VR={vr:.1f} DR={dr:.1f} Gamma={next_gamma*100:.0f}%",
                                 "bounce"
                             ))
                         
@@ -1028,10 +1054,13 @@ def main():
                             if next_gamma > 0.5:
                                 signals.append(("🔴 Gamma极度集中", f"{next_gamma*100:.0f}%将在下次到期释放，剧烈波动风险", "gamma_risk_high"))
                             elif next_gamma > 0.25:
-                                signals.append(("🟠 Gamma集中警告", f"{next_gamma*100:.0f}%将在下次到期释放（官方警戒线25%）", "gamma_risk_medium"))
+                                # 只有在没有触发反弹或陷阱信号时才显示一般性警告
+                                has_bounce_or_trap = any(s[2] in ['bounce', 'gamma_trap'] for s in signals)
+                                if not has_bounce_or_trap:
+                                    signals.append(("🟠 Gamma集中警告", f"{next_gamma*100:.0f}%将在下次到期释放（官方警戒线25%）", "gamma_risk_medium"))
                         
-                        # 3. 空头挤压风险（极度偏空+低成交+近支撑）
-                        if dr < -5 and (vr is None or pd.isna(vr) or vr < 0.5) and dist_to_pw < 10:
+                        # 3. 空头挤压风险（极度偏空+低成交+近支撑但未破）
+                        if dr < -5 and (vr is None or pd.isna(vr) or vr < 0.5) and 0 < dist_to_pw < 10:
                             signals.append(("⚠️ 空头挤压风险", "极度偏空+低成交+近支撑→空头拥挤，逆势反弹风险", "short_squeeze"))
                         
                         # 4. 多头踩踏风险（偏多+放量+近阻力）
@@ -1050,23 +1079,33 @@ def main():
                             signals.append(("🔴 期权完全主导", f"OI={oi:.0f}%，股价完全由期权流驱动", "oi_extreme"))
                         
                         # 7. 高Volume Ratio但条件不完整时的提示
-                        if (vr is not None and not pd.isna(vr) and vr > 1.5):
-                            # 检查是否已经触发了反弹信号
-                            has_bounce = any(s[2] == 'bounce' for s in signals)
-                            if not has_bounce:
+                        if (vr is not None and not pd.isna(vr) and vr > 1.2):
+                            # 检查是否已经触发了反弹或陷阱信号
+                            has_bounce_or_trap = any(s[2] in ['bounce', 'gamma_trap'] for s in signals)
+                            if not has_bounce_or_trap:
                                 missing = []
                                 if dr >= -3:
-                                    missing.append("DR未偏Put")
+                                    missing.append("DR未偏Put(<-3)")
                                 if next_gamma is None or pd.isna(next_gamma) or next_gamma <= 0.25:
-                                    missing.append("Gamma未集中")
-                                if dist_to_pw <= 5:
-                                    missing.append("太近PW")
+                                    missing.append("Gamma未集中(>25%)")
+                                if dist_to_pw <= 2:
+                                    missing.append("太近PW(<2%)")
+                                if dist_to_pw < 0:
+                                    missing.append("已破PW")
                                 if missing:
                                     signals.append((
                                         "📊 高VR观察", 
                                         f"ATM Put活跃(VR={vr:.1f})，但缺少: {', '.join(missing)}",
                                         "vr_watch"
                                     ))
+                        
+                        # 8. 负Gamma区高波动警告（价格低于Hedge Wall）
+                        if dist_to_hw is not None and dist_to_hw < -5 and oi > 30:
+                            signals.append((
+                                "⚠️ 深度负Gamma区", 
+                                f"价格低于HW {abs(dist_to_hw):.1f}%，高波动趋势环境，波动可能放大",
+                                "negative_gamma_zone"
+                            ))
                         
                         return signals
                     
@@ -1242,49 +1281,74 @@ def main():
                             st.info("无观察标的")
                     
                     # ===== 特殊信号汇总 =====
-                    with st.expander("⚡ 特殊信号汇总（反弹潜力/到期风险/挤压风险）"):
+                    with st.expander("⚡ 特殊信号汇总（Gamma陷阱/反弹潜力/到期风险）"):
                         has_special = sg_filtered[sg_filtered['Special_Signals'].apply(len) > 0].copy()
                         
                         if len(has_special) > 0:
                             # 分类显示
+                            gamma_traps = []
                             bounce_candidates = []
                             gamma_risks = []
                             squeeze_risks = []
+                            negative_gamma_zones = []
                             divergences = []
+                            vr_watches = []
                             
                             for _, row in has_special.iterrows():
                                 for sig in row['Special_Signals']:
                                     sig_type = sig[2]
                                     entry = f"**{row['Symbol']}** ${row['Current Price']:.2f}: {sig[1]}"
                                     
-                                    if sig_type == 'bounce':
+                                    if sig_type == 'gamma_trap':
+                                        gamma_traps.append(entry)
+                                    elif sig_type == 'bounce':
                                         bounce_candidates.append(entry)
                                     elif sig_type in ['gamma_risk_high', 'gamma_risk_medium']:
                                         gamma_risks.append(entry)
                                     elif sig_type in ['short_squeeze', 'long_liquidation']:
                                         squeeze_risks.append(entry)
+                                    elif sig_type == 'negative_gamma_zone':
+                                        negative_gamma_zones.append(entry)
                                     elif sig_type == 'divergence':
                                         divergences.append(entry)
+                                    elif sig_type == 'vr_watch':
+                                        vr_watches.append(entry)
+                            
+                            # 按优先级显示
+                            if gamma_traps:
+                                st.markdown("**💀 Gamma陷阱（勿抄底！）:**")
+                                for item in gamma_traps:
+                                    st.error(item)
                             
                             if bounce_candidates:
                                 st.markdown("**⚡ 到期反弹潜力:**")
                                 for item in bounce_candidates:
-                                    st.markdown(f"  - {item}")
+                                    st.success(item)
                             
                             if gamma_risks:
                                 st.markdown("**🔴 到期Gamma集中:**")
                                 for item in gamma_risks:
-                                    st.markdown(f"  - {item}")
+                                    st.warning(item)
                             
                             if squeeze_risks:
                                 st.markdown("**⚠️ 挤压/踩踏风险:**")
                                 for item in squeeze_risks:
-                                    st.markdown(f"  - {item}")
+                                    st.warning(item)
+                            
+                            if negative_gamma_zones:
+                                st.markdown("**⚠️ 深度负Gamma区:**")
+                                for item in negative_gamma_zones:
+                                    st.warning(item)
                             
                             if divergences:
                                 st.markdown("**❓ 指标分歧:**")
                                 for item in divergences:
-                                    st.markdown(f"  - {item}")
+                                    st.info(item)
+                            
+                            if vr_watches:
+                                st.markdown("**📊 高VR观察（条件不完整）:**")
+                                for item in vr_watches:
+                                    st.info(item)
                         else:
                             st.info("无特殊信号")
                     
@@ -1499,48 +1563,49 @@ def main():
         
         with st.expander("⚡ 特殊信号说明"):
             st.markdown("""
-            **到期反弹潜力（4个条件必须同时满足）:**
-            1. Volume Ratio > 1.5（ATM Put活跃）
+            **💀 Gamma陷阱（最高优先级警告）:**
+            - 已跌破Put Wall + Next Exp Gamma > 25%
+            - MM正在连环抛售，**千万不要抄底！**
+            
+            ---
+            
+            **⚡ 到期反弹潜力（4条件 + 环境修正）:**
+            1. Volume Ratio > 1.2（ATM Put活跃）
             2. Delta Ratio < -3（Put Delta占优）
             3. Next Exp Gamma > 25%（临近到期）
-            4. 价格高于Put Wall 5%以上（Put可能到期OTM）
+            4. 价格高于Put Wall 2%以上
+            
+            **环境修正（基于Hedge Wall）:**
+            - 正Gamma区（价格>HW）：均值回归，反弹更稳健
+            - 负Gamma区（价格<HW）：高波动，反弹剧烈但风险更高
             
             **逻辑链条:**
             ```
-            大量ATM Put活跃
+            MM Short Put → 正Delta
                 ↓
-            MM作为对手方Short Put
+            卖股票对冲（持有空头）
                 ↓
-            Short Put = 正Delta敞口
+            到期Put无价值(OTM)
                 ↓
-            MM卖出股票对冲（持有空头）
-                ↓
-            到期时Put无价值（OTM）
-                ↓
-            MM买回股票平仓
-                ↓
-            买盘 → 反弹！
+            买回股票平仓 → 反弹
             ```
             
-            ⚠️ 高VR本身不代表方向，必须联合其他指标判断
+            ---
+            
+            **MM对冲速查:**
+            | MM持仓 | Delta | 对冲 | 到期平仓 |
+            |--------|-------|------|---------|
+            | Short Call | 负 | 买股 | 卖股↓ |
+            | Short Put | 正 | 卖股 | 买股↑ |
             
             ---
             
-            **MM对冲方向速查:**
-            | MM持仓 | Delta敞口 | 对冲 | 到期平仓 |
-            |--------|----------|------|---------|
-            | Short Call | 负 | 买股 | 卖股(压力) |
-            | Short Put | 正 | 卖股 | 买股(反弹) |
-            
-            ---
-            
-            **Gamma集中风险:**
-            - Next Exp Gamma > 25%（官方警戒线）
-            - 到期前后容易剧烈波动或方向转变
-            
-            **空头挤压/多头踩踏:**
-            - 空头挤压: DR<-5 + 低成交 + 近PW
-            - 多头踩踏: DR>-1 + 放量 + 近CW
+            **其他信号:**
+            - 🔴 Gamma极度集中: >50%待释放
+            - 🟠 Gamma集中警告: >25%待释放
+            - ⚠️ 空头挤压: DR<-5 + 低VR + 近PW
+            - ⚠️ 多头踩踏: DR>-1 + 高VR + 近CW
+            - ⚠️ 深度负Gamma区: 价格远低于HW
             """)
 
 
