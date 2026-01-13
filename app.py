@@ -10,7 +10,9 @@ import yfinance as yf
 import pandas as pd
 import pandas_ta as ta
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
+import json
+import os
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -22,6 +24,12 @@ st.set_page_config(
     page_icon="🎯",
     layout="wide"
 )
+
+# ============================================================
+# Squeeze追踪配置
+# ============================================================
+TRACKING_FILE = "./squeeze_tracking.json"
+SQUEEZE_THRESHOLD = 5.0  # 5%涨幅算squeeze确认
 
 # ============================================================
 # 常量定义
@@ -141,6 +149,159 @@ def get_stock_pool(pool_name: str) -> list:
         return list(set(NASDAQ_100 + SP_500))
     else:
         return []
+
+
+# ============================================================
+# Squeeze追踪模块
+# ============================================================
+
+def load_tracking_data():
+    """加载追踪数据"""
+    if os.path.exists(TRACKING_FILE):
+        try:
+            with open(TRACKING_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def save_tracking_data(data):
+    """保存追踪数据"""
+    with open(TRACKING_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2, ensure_ascii=False, default=str)
+
+def get_current_price(symbol):
+    """获取当前价格"""
+    try:
+        ticker = yf.Ticker(symbol)
+        hist = ticker.history(period="1d")
+        if not hist.empty:
+            return float(hist['Close'].iloc[-1])
+    except:
+        pass
+    return None
+
+def get_price_history(symbol, start_date, end_date=None):
+    """获取历史价格"""
+    try:
+        ticker = yf.Ticker(symbol)
+        if end_date:
+            hist = ticker.history(start=start_date, end=end_date)
+        else:
+            hist = ticker.history(start=start_date)
+        return hist
+    except:
+        return None
+
+def update_tracking_record(symbol, tracking_data, current_price):
+    """更新单个追踪记录"""
+    if symbol not in tracking_data:
+        return None
+    
+    record = tracking_data[symbol]
+    today = datetime.now().strftime('%Y-%m-%d')
+    
+    # 更新每日价格
+    if 'daily_prices' not in record:
+        record['daily_prices'] = {}
+    
+    if current_price:
+        record['daily_prices'][today] = current_price
+    
+    # 计算指标
+    entry_price = record.get('entry_price', 0)
+    if entry_price > 0:
+        prices = list(record['daily_prices'].values())
+        
+        # 当前涨幅
+        record['current_return'] = ((current_price - entry_price) / entry_price * 100) if current_price else 0
+        
+        # 最大涨幅
+        record['max_gain'] = max([(p - entry_price) / entry_price * 100 for p in prices]) if prices else 0
+        
+        # 最大回撤
+        record['max_drawdown'] = min([(p - entry_price) / entry_price * 100 for p in prices]) if prices else 0
+        
+        # 判断是否确认squeeze
+        record['squeeze_confirmed'] = record['max_gain'] >= SQUEEZE_THRESHOLD
+    
+    # 检查是否到达追踪结束日期
+    track_end = record.get('track_end_date')
+    if track_end:
+        try:
+            end_date = datetime.strptime(track_end, '%Y-%m-%d')
+            if datetime.now() > end_date:
+                record['status'] = 'completed'
+        except:
+            pass
+    
+    return record
+
+def add_new_tracking(symbol, row, signal_type, today_str):
+    """添加新的追踪记录"""
+    # 解析到期日
+    top_gamma_exp = row.get('Top Gamma Exp', '')
+    try:
+        if isinstance(top_gamma_exp, str) and top_gamma_exp:
+            exp_date = datetime.strptime(top_gamma_exp, '%Y-%m-%d')
+            track_end = (exp_date + timedelta(days=2)).strftime('%Y-%m-%d')
+        else:
+            # 默认7天后结束追踪
+            track_end = (datetime.now() + timedelta(days=7)).strftime('%Y-%m-%d')
+    except:
+        track_end = (datetime.now() + timedelta(days=7)).strftime('%Y-%m-%d')
+    
+    return {
+        'signal_date': today_str,
+        'entry_price': float(row['Current Price']),
+        'top_gamma_exp': str(top_gamma_exp) if top_gamma_exp else '',
+        'track_end_date': track_end,
+        'signal_type': signal_type,
+        'vol_regime': row.get('Vol_Regime', '未知'),
+        'delta_ratio': float(row.get('Delta Ratio', 0)),
+        'gamma_ratio': float(row.get('Gamma Ratio', 0)),
+        'volume_ratio': float(row.get('Volume Ratio', 0)) if pd.notna(row.get('Volume Ratio')) else 0,
+        'next_exp_gamma': float(row.get('Next Exp Gamma', 0)) if pd.notna(row.get('Next Exp Gamma')) else 0,
+        'options_impact': float(row.get('Options Impact', 0)) if pd.notna(row.get('Options Impact')) else 0,
+        'put_wall': float(row.get('Put Wall', 0)),
+        'call_wall': float(row.get('Call Wall', 0)),
+        'hedge_wall': float(row.get('Hedge Wall', 0)) if pd.notna(row.get('Hedge Wall')) else 0,
+        'daily_prices': {today_str: float(row['Current Price'])},
+        'current_return': 0,
+        'max_gain': 0,
+        'max_drawdown': 0,
+        'squeeze_confirmed': False,
+        'status': 'tracking',
+        'is_new': True  # 标记为新增
+    }
+
+def calculate_tracking_stats(tracking_data):
+    """计算追踪统计"""
+    tracking_count = 0
+    completed_count = 0
+    squeeze_count = 0
+    failed_count = 0
+    
+    for symbol, record in tracking_data.items():
+        status = record.get('status', 'tracking')
+        if status == 'tracking':
+            tracking_count += 1
+        elif status == 'completed':
+            completed_count += 1
+            if record.get('squeeze_confirmed', False):
+                squeeze_count += 1
+            else:
+                failed_count += 1
+    
+    win_rate = (squeeze_count / completed_count * 100) if completed_count > 0 else 0
+    
+    return {
+        'tracking': tracking_count,
+        'completed': completed_count,
+        'squeeze': squeeze_count,
+        'failed': failed_count,
+        'win_rate': win_rate
+    }
 
 
 # ============================================================
@@ -1476,6 +1637,176 @@ def main():
                                 st.divider()
                         else:
                             st.info("无高确信做空信号")
+                    
+                    # ===== Squeeze追踪面板 =====
+                    st.subheader("📈 Squeeze追踪面板")
+                    st.caption(f"追踪文件: {os.path.abspath(TRACKING_FILE)} | Squeeze标准: ≥{SQUEEZE_THRESHOLD}%涨幅")
+                    
+                    # 加载追踪数据
+                    tracking_data = load_tracking_data()
+                    today_str = datetime.now().strftime('%Y-%m-%d')
+                    
+                    # 识别新标的并添加到追踪
+                    new_symbols = []
+                    for _, row in sg_filtered.iterrows():
+                        symbol = row['Symbol']
+                        signal_type = row.get('Trade_Signal', '未知信号')
+                        
+                        if symbol not in tracking_data:
+                            # 新标的
+                            tracking_data[symbol] = add_new_tracking(symbol, row, signal_type, today_str)
+                            new_symbols.append(symbol)
+                        else:
+                            # 已存在的标的，检查是否需要更新信号（如果信号变化）
+                            tracking_data[symbol]['is_new'] = False
+                    
+                    # 保存更新
+                    if new_symbols:
+                        save_tracking_data(tracking_data)
+                        st.success(f"🆕 新增追踪: {', '.join(new_symbols)}")
+                    
+                    # 刷新价格按钮
+                    col1, col2, col3 = st.columns([1, 1, 2])
+                    with col1:
+                        refresh_btn = st.button("🔄 刷新价格", type="primary")
+                    with col2:
+                        clear_completed = st.button("🗑️ 清除已完成")
+                    with col3:
+                        if st.button("🗑️ 清空所有追踪记录"):
+                            tracking_data = {}
+                            save_tracking_data(tracking_data)
+                            st.rerun()
+                    
+                    if clear_completed:
+                        tracking_data = {k: v for k, v in tracking_data.items() if v.get('status') != 'completed'}
+                        save_tracking_data(tracking_data)
+                        st.rerun()
+                    
+                    if refresh_btn:
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
+                        
+                        symbols_to_update = list(tracking_data.keys())
+                        total = len(symbols_to_update)
+                        
+                        for i, symbol in enumerate(symbols_to_update):
+                            status_text.text(f"更新 {symbol}...")
+                            current_price = get_current_price(symbol)
+                            if current_price:
+                                update_tracking_record(symbol, tracking_data, current_price)
+                            progress_bar.progress((i + 1) / total)
+                        
+                        save_tracking_data(tracking_data)
+                        status_text.text("✅ 价格更新完成!")
+                        st.rerun()
+                    
+                    # 显示统计
+                    stats = calculate_tracking_stats(tracking_data)
+                    
+                    stat_col1, stat_col2, stat_col3, stat_col4, stat_col5 = st.columns(5)
+                    with stat_col1:
+                        st.metric("⏳ 追踪中", stats['tracking'])
+                    with stat_col2:
+                        st.metric("✅ 已完成", stats['completed'])
+                    with stat_col3:
+                        st.metric("🎯 确认Squeeze", stats['squeeze'])
+                    with stat_col4:
+                        st.metric("❌ 失败", stats['failed'])
+                    with stat_col5:
+                        st.metric("📊 胜率", f"{stats['win_rate']:.1f}%")
+                    
+                    # 显示追踪表格
+                    if tracking_data:
+                        # 构建显示DataFrame
+                        display_rows = []
+                        for symbol, record in tracking_data.items():
+                            status = record.get('status', 'tracking')
+                            squeeze_confirmed = record.get('squeeze_confirmed', False)
+                            is_new = record.get('is_new', False)
+                            
+                            # 状态图标
+                            if status == 'completed':
+                                status_icon = "✅ 确认" if squeeze_confirmed else "❌ 失败"
+                            else:
+                                status_icon = "⏳ 追踪中"
+                            
+                            # 新标的标注
+                            symbol_display = f"🆕 {symbol}" if is_new else symbol
+                            
+                            # 涨幅颜色标注
+                            current_return = record.get('current_return', 0)
+                            max_gain = record.get('max_gain', 0)
+                            max_dd = record.get('max_drawdown', 0)
+                            
+                            display_rows.append({
+                                '标的': symbol_display,
+                                '信号日期': record.get('signal_date', ''),
+                                'D0价格': record.get('entry_price', 0),
+                                '当前涨幅%': current_return,
+                                '最大涨幅%': max_gain,
+                                '最大回撤%': max_dd,
+                                '信号类型': record.get('signal_type', '')[:15],
+                                '波动环境': record.get('vol_regime', ''),
+                                '到期日': record.get('top_gamma_exp', ''),
+                                '追踪结束': record.get('track_end_date', ''),
+                                'Squeeze': "✅" if squeeze_confirmed else ("❌" if status == 'completed' else "⏳"),
+                                '状态': status_icon
+                            })
+                        
+                        display_df = pd.DataFrame(display_rows)
+                        
+                        # 按状态排序：追踪中优先，然后按信号日期
+                        display_df['sort_key'] = display_df['状态'].apply(lambda x: 0 if '追踪' in x else 1)
+                        display_df = display_df.sort_values(['sort_key', '信号日期'], ascending=[True, False])
+                        display_df = display_df.drop('sort_key', axis=1)
+                        
+                        # 样式化显示
+                        def color_returns(val):
+                            if isinstance(val, (int, float)):
+                                if val >= SQUEEZE_THRESHOLD:
+                                    return 'background-color: #90EE90'  # 浅绿
+                                elif val >= 0:
+                                    return 'background-color: #FFFACD'  # 浅黄
+                                else:
+                                    return 'background-color: #FFB6C1'  # 浅红
+                            return ''
+                        
+                        styled_df = display_df.style.applymap(
+                            color_returns, 
+                            subset=['当前涨幅%', '最大涨幅%']
+                        ).format({
+                            'D0价格': '{:.2f}',
+                            '当前涨幅%': '{:+.2f}%',
+                            '最大涨幅%': '{:+.2f}%',
+                            '最大回撤%': '{:+.2f}%'
+                        })
+                        
+                        st.dataframe(styled_df, use_container_width=True, hide_index=True)
+                        
+                        # 详细视图（可展开）
+                        with st.expander("📋 详细追踪记录"):
+                            for symbol, record in tracking_data.items():
+                                is_new = record.get('is_new', False)
+                                new_badge = "🆕 " if is_new else ""
+                                
+                                st.markdown(f"""
+                                ---
+                                **{new_badge}{symbol}** | {record.get('signal_type', '')} | {record.get('vol_regime', '')}
+                                - 信号日期: {record.get('signal_date', '')} | D0价格: ${record.get('entry_price', 0):.2f}
+                                - 当前涨幅: {record.get('current_return', 0):+.2f}% | 最大涨幅: {record.get('max_gain', 0):+.2f}% | 最大回撤: {record.get('max_drawdown', 0):+.2f}%
+                                - DR: {record.get('delta_ratio', 0):.2f} | GR: {record.get('gamma_ratio', 0):.2f} | VR: {record.get('volume_ratio', 0):.2f}
+                                - PW: {record.get('put_wall', 0)} | CW: {record.get('call_wall', 0)} | HW: {record.get('hedge_wall', 0)}
+                                - 到期日: {record.get('top_gamma_exp', '')} | 追踪结束: {record.get('track_end_date', '')}
+                                - Squeeze确认: {'✅ 是' if record.get('squeeze_confirmed') else '❌ 否'} | 状态: {record.get('status', 'tracking')}
+                                """)
+                                
+                                # 显示每日价格
+                                daily_prices = record.get('daily_prices', {})
+                                if daily_prices:
+                                    price_str = " → ".join([f"{d}: ${p:.2f}" for d, p in sorted(daily_prices.items())])
+                                    st.caption(f"价格记录: {price_str}")
+                    else:
+                        st.info("暂无追踪记录。上传SpotGamma CSV后，符合条件的标的会自动添加到追踪列表。")
                         
             except Exception as e:
                 st.error(f"读取文件失败: {e}")
