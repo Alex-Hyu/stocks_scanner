@@ -210,11 +210,11 @@ def update_tracking_record(symbol, tracking_data, current_price):
     
     # 计算指标
     entry_price = record.get('entry_price', 0)
-    if entry_price > 0:
+    if entry_price > 0 and current_price:
         prices = list(record['daily_prices'].values())
         
-        # 当前涨幅
-        record['current_return'] = ((current_price - entry_price) / entry_price * 100) if current_price else 0
+        # 当前涨幅（从D0到当前价格）
+        record['current_return'] = ((current_price - entry_price) / entry_price * 100)
         
         # 最大涨幅
         record['max_gain'] = max([(p - entry_price) / entry_price * 100 for p in prices]) if prices else 0
@@ -222,8 +222,8 @@ def update_tracking_record(symbol, tracking_data, current_price):
         # 最大回撤
         record['max_drawdown'] = min([(p - entry_price) / entry_price * 100 for p in prices]) if prices else 0
         
-        # 判断是否确认squeeze
-        record['squeeze_confirmed'] = record['max_gain'] >= SQUEEZE_THRESHOLD
+        # 判断是否确认squeeze（当前涨幅>=5%就确认）
+        record['squeeze_confirmed'] = record['current_return'] >= SQUEEZE_THRESHOLD
     
     # 检查是否到达追踪结束日期
     track_end = record.get('track_end_date')
@@ -284,11 +284,16 @@ def calculate_tracking_stats(tracking_data):
     
     for symbol, record in tracking_data.items():
         status = record.get('status', 'tracking')
+        current_return = record.get('current_return', 0)
+        squeeze_confirmed = current_return >= SQUEEZE_THRESHOLD  # 当前涨幅>=5%就确认
+        
         if status == 'tracking':
             tracking_count += 1
+            if squeeze_confirmed:
+                squeeze_count += 1
         elif status == 'completed':
             completed_count += 1
-            if record.get('squeeze_confirmed', False):
+            if squeeze_confirmed:
                 squeeze_count += 1
             else:
                 failed_count += 1
@@ -1738,26 +1743,37 @@ def main():
                             max_gain = record.get('max_gain', 0)
                             max_dd = record.get('max_drawdown', 0)
                             
+                            # 获取当前价格（最新的daily_prices）
+                            daily_prices = record.get('daily_prices', {})
+                            if daily_prices:
+                                latest_date = max(daily_prices.keys())
+                                current_price = daily_prices[latest_date]
+                            else:
+                                current_price = record.get('entry_price', 0)
+                            
+                            # Squeeze判断：当前涨幅>=5%就确认
+                            squeeze_confirmed = current_return >= SQUEEZE_THRESHOLD
+                            
                             display_rows.append({
                                 '标的': symbol_display,
                                 '信号日期': record.get('signal_date', ''),
                                 'D0价格': record.get('entry_price', 0),
+                                '当前价格': current_price,
                                 '当前涨幅%': current_return,
                                 '最大涨幅%': max_gain,
                                 '最大回撤%': max_dd,
                                 '信号类型': record.get('signal_type', '')[:15],
                                 '波动环境': record.get('vol_regime', ''),
                                 '到期日': record.get('top_gamma_exp', ''),
-                                '追踪结束': record.get('track_end_date', ''),
                                 'Squeeze': "✅" if squeeze_confirmed else ("❌" if status == 'completed' else "⏳"),
                                 '状态': status_icon
                             })
                         
                         display_df = pd.DataFrame(display_rows)
                         
-                        # 按状态排序：追踪中优先，然后按信号日期
-                        display_df['sort_key'] = display_df['状态'].apply(lambda x: 0 if '追踪' in x else 1)
-                        display_df = display_df.sort_values(['sort_key', '信号日期'], ascending=[True, False])
+                        # 按Squeeze确认优先，然后按当前涨幅排序
+                        display_df['sort_key'] = display_df['Squeeze'].apply(lambda x: 0 if x == '✅' else (1 if x == '⏳' else 2))
+                        display_df = display_df.sort_values(['sort_key', '当前涨幅%'], ascending=[True, False])
                         display_df = display_df.drop('sort_key', axis=1)
                         
                         # 样式化显示
@@ -1775,7 +1791,8 @@ def main():
                             color_returns, 
                             subset=['当前涨幅%', '最大涨幅%']
                         ).format({
-                            'D0价格': '{:.2f}',
+                            'D0价格': '${:.2f}',
+                            '当前价格': '${:.2f}',
                             '当前涨幅%': '{:+.2f}%',
                             '最大涨幅%': '{:+.2f}%',
                             '最大回撤%': '{:+.2f}%'
@@ -1789,19 +1806,29 @@ def main():
                                 is_new = record.get('is_new', False)
                                 new_badge = "🆕 " if is_new else ""
                                 
+                                # 获取当前价格
+                                daily_prices = record.get('daily_prices', {})
+                                if daily_prices:
+                                    latest_date = max(daily_prices.keys())
+                                    current_price = daily_prices[latest_date]
+                                else:
+                                    current_price = record.get('entry_price', 0)
+                                
+                                current_return = record.get('current_return', 0)
+                                squeeze_status = '✅ 是' if current_return >= SQUEEZE_THRESHOLD else '❌ 否'
+                                
                                 st.markdown(f"""
                                 ---
                                 **{new_badge}{symbol}** | {record.get('signal_type', '')} | {record.get('vol_regime', '')}
-                                - 信号日期: {record.get('signal_date', '')} | D0价格: ${record.get('entry_price', 0):.2f}
-                                - 当前涨幅: {record.get('current_return', 0):+.2f}% | 最大涨幅: {record.get('max_gain', 0):+.2f}% | 最大回撤: {record.get('max_drawdown', 0):+.2f}%
+                                - 信号日期: {record.get('signal_date', '')} | D0价格: ${record.get('entry_price', 0):.2f} | 当前价格: ${current_price:.2f}
+                                - 当前涨幅: {current_return:+.2f}% | 最大涨幅: {record.get('max_gain', 0):+.2f}% | 最大回撤: {record.get('max_drawdown', 0):+.2f}%
                                 - DR: {record.get('delta_ratio', 0):.2f} | GR: {record.get('gamma_ratio', 0):.2f} | VR: {record.get('volume_ratio', 0):.2f}
                                 - PW: {record.get('put_wall', 0)} | CW: {record.get('call_wall', 0)} | HW: {record.get('hedge_wall', 0)}
                                 - 到期日: {record.get('top_gamma_exp', '')} | 追踪结束: {record.get('track_end_date', '')}
-                                - Squeeze确认: {'✅ 是' if record.get('squeeze_confirmed') else '❌ 否'} | 状态: {record.get('status', 'tracking')}
+                                - Squeeze确认(≥5%): {squeeze_status} | 状态: {record.get('status', 'tracking')}
                                 """)
                                 
                                 # 显示每日价格
-                                daily_prices = record.get('daily_prices', {})
                                 if daily_prices:
                                     price_str = " → ".join([f"{d}: ${p:.2f}" for d, p in sorted(daily_prices.items())])
                                     st.caption(f"价格记录: {price_str}")
