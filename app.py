@@ -224,6 +224,20 @@ def update_tracking_record(symbol, tracking_data, current_price):
         
         # 判断是否确认squeeze（当前涨幅>=5%就确认）
         record['squeeze_confirmed'] = record['current_return'] >= SQUEEZE_THRESHOLD
+        
+        # 判断信号方向是否正确
+        signal_direction = record.get('signal_direction', 'neutral')
+        current_return = record['current_return']
+        
+        if signal_direction == 'bullish':
+            # 多头信号：涨了就正确
+            record['direction_correct'] = current_return > 0
+        elif signal_direction == 'bearish':
+            # 空头信号：跌了就正确
+            record['direction_correct'] = current_return < 0
+        else:
+            # 中性信号：不判断
+            record['direction_correct'] = None
     
     # 检查是否到达追踪结束日期
     track_end = record.get('track_end_date')
@@ -244,12 +258,20 @@ def add_new_tracking(symbol, row, signal_type, today_str):
     try:
         if isinstance(top_gamma_exp, str) and top_gamma_exp:
             exp_date = datetime.strptime(top_gamma_exp, '%Y-%m-%d')
-            track_end = (exp_date + timedelta(days=2)).strftime('%Y-%m-%d')
+            # 到期日+5个交易日（约7个自然日）
+            track_end = (exp_date + timedelta(days=7)).strftime('%Y-%m-%d')
         else:
-            # 默认7天后结束追踪
-            track_end = (datetime.now() + timedelta(days=7)).strftime('%Y-%m-%d')
+            # 默认10天后结束追踪
+            track_end = (datetime.now() + timedelta(days=10)).strftime('%Y-%m-%d')
     except:
-        track_end = (datetime.now() + timedelta(days=7)).strftime('%Y-%m-%d')
+        track_end = (datetime.now() + timedelta(days=10)).strftime('%Y-%m-%d')
+    
+    # 判断信号方向
+    signal_direction = 'neutral'
+    if any(x in signal_type for x in ['做多', '反弹', 'bullish', '偏多']):
+        signal_direction = 'bullish'
+    elif any(x in signal_type for x in ['做空', '压力', 'bearish', '偏空']):
+        signal_direction = 'bearish'
     
     return {
         'signal_date': today_str,
@@ -257,6 +279,7 @@ def add_new_tracking(symbol, row, signal_type, today_str):
         'top_gamma_exp': str(top_gamma_exp) if top_gamma_exp else '',
         'track_end_date': track_end,
         'signal_type': signal_type,
+        'signal_direction': signal_direction,  # 新增：信号方向
         'vol_regime': row.get('Vol_Regime', '未知'),
         'delta_ratio': float(row.get('Delta Ratio', 0)),
         'gamma_ratio': float(row.get('Gamma Ratio', 0)),
@@ -271,6 +294,7 @@ def add_new_tracking(symbol, row, signal_type, today_str):
         'max_gain': 0,
         'max_drawdown': 0,
         'squeeze_confirmed': False,
+        'direction_correct': None,  # 新增：方向是否正确
         'status': 'tracking',
         'is_new': True  # 标记为新增
     }
@@ -307,6 +331,39 @@ def calculate_tracking_stats(tracking_data):
         'failed': failed_count,
         'win_rate': win_rate
     }
+
+def calculate_signal_accuracy_stats(tracking_data):
+    """计算信号方向正确率统计"""
+    stats = {
+        'bullish': {'total': 0, 'correct': 0, 'wrong': 0, 'pending': 0},
+        'bearish': {'total': 0, 'correct': 0, 'wrong': 0, 'pending': 0},
+        'neutral': {'total': 0, 'correct': 0, 'wrong': 0, 'pending': 0},
+        'overall': {'total': 0, 'correct': 0, 'wrong': 0, 'pending': 0}
+    }
+    
+    for symbol, record in tracking_data.items():
+        direction = record.get('signal_direction', 'neutral')
+        direction_correct = record.get('direction_correct', None)
+        
+        stats[direction]['total'] += 1
+        stats['overall']['total'] += 1
+        
+        if direction_correct is True:
+            stats[direction]['correct'] += 1
+            stats['overall']['correct'] += 1
+        elif direction_correct is False:
+            stats[direction]['wrong'] += 1
+            stats['overall']['wrong'] += 1
+        else:
+            stats[direction]['pending'] += 1
+            stats['overall']['pending'] += 1
+    
+    # 计算正确率
+    for key in stats:
+        total = stats[key]['correct'] + stats[key]['wrong']
+        stats[key]['accuracy'] = (stats[key]['correct'] / total * 100) if total > 0 else 0
+    
+    return stats
 
 
 # ============================================================
@@ -1834,6 +1891,163 @@ def main():
                                     st.caption(f"价格记录: {price_str}")
                     else:
                         st.info("暂无追踪记录。上传SpotGamma CSV后，符合条件的标的会自动添加到追踪列表。")
+                    
+                    # ===== 信号方向验证面板 =====
+                    st.subheader("🎯 信号方向验证面板")
+                    st.caption("验证信号方向是否正确：多头信号涨了=正确，空头信号跌了=正确 | 追踪至到期日+5个交易日")
+                    
+                    if tracking_data:
+                        # 计算信号正确率统计
+                        signal_stats = calculate_signal_accuracy_stats(tracking_data)
+                        
+                        # 显示统计
+                        st.markdown("#### 📊 信号正确率统计")
+                        
+                        sig_col1, sig_col2, sig_col3, sig_col4 = st.columns(4)
+                        with sig_col1:
+                            st.metric(
+                                "🟢 多头信号", 
+                                f"{signal_stats['bullish']['accuracy']:.1f}%",
+                                f"{signal_stats['bullish']['correct']}/{signal_stats['bullish']['correct'] + signal_stats['bullish']['wrong']} 正确"
+                            )
+                        with sig_col2:
+                            st.metric(
+                                "🔴 空头信号", 
+                                f"{signal_stats['bearish']['accuracy']:.1f}%",
+                                f"{signal_stats['bearish']['correct']}/{signal_stats['bearish']['correct'] + signal_stats['bearish']['wrong']} 正确"
+                            )
+                        with sig_col3:
+                            st.metric(
+                                "⚪ 中性信号", 
+                                f"{signal_stats['neutral']['total']}个",
+                                "不计入正确率"
+                            )
+                        with sig_col4:
+                            st.metric(
+                                "📈 整体正确率", 
+                                f"{signal_stats['overall']['accuracy']:.1f}%",
+                                f"{signal_stats['overall']['correct']}/{signal_stats['overall']['correct'] + signal_stats['overall']['wrong']} 正确"
+                            )
+                        
+                        # 构建验证表格
+                        verify_rows = []
+                        for symbol, record in tracking_data.items():
+                            direction = record.get('signal_direction', 'neutral')
+                            direction_correct = record.get('direction_correct', None)
+                            current_return = record.get('current_return', 0)
+                            is_new = record.get('is_new', False)
+                            
+                            # 方向图标
+                            if direction == 'bullish':
+                                dir_icon = "🟢 多头"
+                            elif direction == 'bearish':
+                                dir_icon = "🔴 空头"
+                            else:
+                                dir_icon = "⚪ 中性"
+                            
+                            # 正确性图标
+                            if direction_correct is True:
+                                correct_icon = "✅ 正确"
+                            elif direction_correct is False:
+                                correct_icon = "❌ 错误"
+                            else:
+                                correct_icon = "⏳ 待定"
+                            
+                            # 新标的标注
+                            symbol_display = f"🆕 {symbol}" if is_new else symbol
+                            
+                            # 获取当前价格
+                            daily_prices = record.get('daily_prices', {})
+                            if daily_prices:
+                                latest_date = max(daily_prices.keys())
+                                current_price = daily_prices[latest_date]
+                            else:
+                                current_price = record.get('entry_price', 0)
+                            
+                            verify_rows.append({
+                                '标的': symbol_display,
+                                '信号方向': dir_icon,
+                                '信号类型': record.get('signal_type', '')[:20],
+                                'D0价格': record.get('entry_price', 0),
+                                '当前价格': current_price,
+                                '涨跌幅%': current_return,
+                                '方向正确': correct_icon,
+                                '到期日': record.get('top_gamma_exp', ''),
+                                '追踪结束': record.get('track_end_date', ''),
+                                '状态': record.get('status', 'tracking')
+                            })
+                        
+                        verify_df = pd.DataFrame(verify_rows)
+                        
+                        # 按正确性排序：正确 > 待定 > 错误
+                        verify_df['sort_key'] = verify_df['方向正确'].apply(
+                            lambda x: 0 if '正确' in x else (1 if '待定' in x else 2)
+                        )
+                        verify_df = verify_df.sort_values(['sort_key', '涨跌幅%'], ascending=[True, False])
+                        verify_df = verify_df.drop('sort_key', axis=1)
+                        
+                        # 样式化
+                        def color_direction(val):
+                            if '正确' in str(val):
+                                return 'background-color: #90EE90'
+                            elif '错误' in str(val):
+                                return 'background-color: #FFB6C1'
+                            return ''
+                        
+                        def color_return_direction(val):
+                            if isinstance(val, (int, float)):
+                                if val > 0:
+                                    return 'color: green'
+                                elif val < 0:
+                                    return 'color: red'
+                            return ''
+                        
+                        styled_verify = verify_df.style.applymap(
+                            color_direction, subset=['方向正确']
+                        ).applymap(
+                            color_return_direction, subset=['涨跌幅%']
+                        ).format({
+                            'D0价格': '${:.2f}',
+                            '当前价格': '${:.2f}',
+                            '涨跌幅%': '{:+.2f}%'
+                        })
+                        
+                        st.dataframe(styled_verify, use_container_width=True, hide_index=True)
+                        
+                        # 按信号类型分组统计
+                        with st.expander("📋 按信号类型分组统计"):
+                            signal_type_stats = {}
+                            for symbol, record in tracking_data.items():
+                                sig_type = record.get('signal_type', '未知')[:20]
+                                direction_correct = record.get('direction_correct', None)
+                                
+                                if sig_type not in signal_type_stats:
+                                    signal_type_stats[sig_type] = {'total': 0, 'correct': 0, 'wrong': 0}
+                                
+                                signal_type_stats[sig_type]['total'] += 1
+                                if direction_correct is True:
+                                    signal_type_stats[sig_type]['correct'] += 1
+                                elif direction_correct is False:
+                                    signal_type_stats[sig_type]['wrong'] += 1
+                            
+                            type_rows = []
+                            for sig_type, data in signal_type_stats.items():
+                                judged = data['correct'] + data['wrong']
+                                accuracy = (data['correct'] / judged * 100) if judged > 0 else 0
+                                type_rows.append({
+                                    '信号类型': sig_type,
+                                    '总数': data['total'],
+                                    '正确': data['correct'],
+                                    '错误': data['wrong'],
+                                    '待定': data['total'] - judged,
+                                    '正确率': f"{accuracy:.1f}%"
+                                })
+                            
+                            type_df = pd.DataFrame(type_rows)
+                            type_df = type_df.sort_values('总数', ascending=False)
+                            st.dataframe(type_df, use_container_width=True, hide_index=True)
+                    else:
+                        st.info("暂无追踪记录")
                         
             except Exception as e:
                 st.error(f"读取文件失败: {e}")
