@@ -344,7 +344,17 @@ def calculate_signal_accuracy_stats(tracking_data):
     }
     
     for symbol, record in tracking_data.items():
-        direction = record.get('signal_direction', 'neutral')
+        direction = record.get('signal_direction', '')
+        signal_type_text = record.get('signal_type', '')
+        
+        # 如果没有signal_direction字段（旧记录），从signal_type文本推断
+        if not direction or direction == 'neutral':
+            if any(x in signal_type_text for x in ['做多', '反弹', '偏多', 'bullish']):
+                direction = 'bullish'
+            elif any(x in signal_type_text for x in ['做空', '压力', '偏空', '破位', 'bearish']):
+                direction = 'bearish'
+            else:
+                direction = 'neutral'
         
         # 实时计算涨跌幅
         entry_price = record.get('entry_price', 0)
@@ -1958,10 +1968,18 @@ def main():
                         # 构建验证表格
                         verify_rows = []
                         for symbol, record in tracking_data.items():
-                            direction = record.get('signal_direction', 'neutral')
-                            direction_correct = record.get('direction_correct', None)
-                            current_return = record.get('current_return', 0)
+                            direction = record.get('signal_direction', '')
+                            signal_type_text = record.get('signal_type', '')
                             is_new = record.get('is_new', False)
+                            
+                            # 如果没有signal_direction字段（旧记录），从signal_type文本推断
+                            if not direction or direction == 'neutral':
+                                if any(x in signal_type_text for x in ['做多', '反弹', '偏多', 'bullish']):
+                                    direction = 'bullish'
+                                elif any(x in signal_type_text for x in ['做空', '压力', '偏空', '破位', 'bearish']):
+                                    direction = 'bearish'
+                                else:
+                                    direction = 'neutral'
                             
                             # 获取当前价格和涨跌幅
                             daily_prices = record.get('daily_prices', {})
@@ -2060,7 +2078,16 @@ def main():
                             signal_type_stats = {}
                             for symbol, record in tracking_data.items():
                                 sig_type = record.get('signal_type', '未知')[:20]
-                                direction = record.get('signal_direction', 'neutral')
+                                direction = record.get('signal_direction', '')
+                                
+                                # 如果没有signal_direction字段（旧记录），从signal_type文本推断
+                                if not direction or direction == 'neutral':
+                                    if any(x in sig_type for x in ['做多', '反弹', '偏多', 'bullish']):
+                                        direction = 'bullish'
+                                    elif any(x in sig_type for x in ['做空', '压力', '偏空', '破位', 'bearish']):
+                                        direction = 'bearish'
+                                    else:
+                                        direction = 'neutral'
                                 
                                 # 实时计算涨跌幅
                                 entry_price = record.get('entry_price', 0)
