@@ -266,12 +266,14 @@ def add_new_tracking(symbol, row, signal_type, today_str):
     except:
         track_end = (datetime.now() + timedelta(days=10)).strftime('%Y-%m-%d')
     
-    # 判断信号方向
-    signal_direction = 'neutral'
-    if any(x in signal_type for x in ['做多', '反弹', 'bullish', '偏多']):
+    # 判断信号方向 - 使用Signal_Type字段
+    sig_type = row.get('Signal_Type', '')
+    if sig_type in ['bullish', 'bullish_watch']:
         signal_direction = 'bullish'
-    elif any(x in signal_type for x in ['做空', '压力', 'bearish', '偏空']):
+    elif sig_type in ['bearish', 'bearish_watch']:
         signal_direction = 'bearish'
+    else:
+        signal_direction = 'neutral'
     
     return {
         'signal_date': today_str,
@@ -333,34 +335,52 @@ def calculate_tracking_stats(tracking_data):
     }
 
 def calculate_signal_accuracy_stats(tracking_data):
-    """计算信号方向正确率统计"""
+    """计算信号方向正确率统计 - 实时计算"""
     stats = {
-        'bullish': {'total': 0, 'correct': 0, 'wrong': 0, 'pending': 0},
-        'bearish': {'total': 0, 'correct': 0, 'wrong': 0, 'pending': 0},
-        'neutral': {'total': 0, 'correct': 0, 'wrong': 0, 'pending': 0},
-        'overall': {'total': 0, 'correct': 0, 'wrong': 0, 'pending': 0}
+        'bullish': {'total': 0, 'correct': 0, 'wrong': 0},
+        'bearish': {'total': 0, 'correct': 0, 'wrong': 0},
+        'neutral': {'total': 0},
+        'overall': {'total': 0, 'correct': 0, 'wrong': 0}
     }
     
     for symbol, record in tracking_data.items():
         direction = record.get('signal_direction', 'neutral')
-        direction_correct = record.get('direction_correct', None)
         
-        stats[direction]['total'] += 1
-        stats['overall']['total'] += 1
-        
-        if direction_correct is True:
-            stats[direction]['correct'] += 1
-            stats['overall']['correct'] += 1
-        elif direction_correct is False:
-            stats[direction]['wrong'] += 1
-            stats['overall']['wrong'] += 1
+        # 实时计算涨跌幅
+        entry_price = record.get('entry_price', 0)
+        daily_prices = record.get('daily_prices', {})
+        if daily_prices and entry_price > 0:
+            latest_date = max(daily_prices.keys())
+            current_price = daily_prices[latest_date]
+            current_return = ((current_price - entry_price) / entry_price) * 100
         else:
-            stats[direction]['pending'] += 1
-            stats['overall']['pending'] += 1
+            current_return = 0
+        
+        # 实时判断方向正确性
+        if direction == 'bullish':
+            stats['bullish']['total'] += 1
+            stats['overall']['total'] += 1
+            if current_return > 0:
+                stats['bullish']['correct'] += 1
+                stats['overall']['correct'] += 1
+            else:
+                stats['bullish']['wrong'] += 1
+                stats['overall']['wrong'] += 1
+        elif direction == 'bearish':
+            stats['bearish']['total'] += 1
+            stats['overall']['total'] += 1
+            if current_return < 0:
+                stats['bearish']['correct'] += 1
+                stats['overall']['correct'] += 1
+            else:
+                stats['bearish']['wrong'] += 1
+                stats['overall']['wrong'] += 1
+        else:
+            stats['neutral']['total'] += 1
     
     # 计算正确率
-    for key in stats:
-        total = stats[key]['correct'] + stats[key]['wrong']
+    for key in ['bullish', 'bearish', 'overall']:
+        total = stats[key]['total']
         stats[key]['accuracy'] = (stats[key]['correct'] / total * 100) if total > 0 else 0
     
     return stats
@@ -1905,16 +1925,20 @@ def main():
                         
                         sig_col1, sig_col2, sig_col3, sig_col4 = st.columns(4)
                         with sig_col1:
+                            bullish_total = signal_stats['bullish']['total']
+                            bullish_correct = signal_stats['bullish']['correct']
                             st.metric(
-                                "🟢 多头信号", 
+                                f"🟢 多头信号 ({bullish_total}个)", 
                                 f"{signal_stats['bullish']['accuracy']:.1f}%",
-                                f"{signal_stats['bullish']['correct']}/{signal_stats['bullish']['correct'] + signal_stats['bullish']['wrong']} 正确"
+                                f"{bullish_correct}/{bullish_total} 正确"
                             )
                         with sig_col2:
+                            bearish_total = signal_stats['bearish']['total']
+                            bearish_correct = signal_stats['bearish']['correct']
                             st.metric(
-                                "🔴 空头信号", 
+                                f"🔴 空头信号 ({bearish_total}个)", 
                                 f"{signal_stats['bearish']['accuracy']:.1f}%",
-                                f"{signal_stats['bearish']['correct']}/{signal_stats['bearish']['correct'] + signal_stats['bearish']['wrong']} 正确"
+                                f"{bearish_correct}/{bearish_total} 正确"
                             )
                         with sig_col3:
                             st.metric(
@@ -1923,10 +1947,12 @@ def main():
                                 "不计入正确率"
                             )
                         with sig_col4:
+                            overall_total = signal_stats['overall']['total']
+                            overall_correct = signal_stats['overall']['correct']
                             st.metric(
-                                "📈 整体正确率", 
+                                f"📈 整体正确率 ({overall_total}个)", 
                                 f"{signal_stats['overall']['accuracy']:.1f}%",
-                                f"{signal_stats['overall']['correct']}/{signal_stats['overall']['correct'] + signal_stats['overall']['wrong']} 正确"
+                                f"{overall_correct}/{overall_total} 正确"
                             )
                         
                         # 构建验证表格
@@ -1936,6 +1962,29 @@ def main():
                             direction_correct = record.get('direction_correct', None)
                             current_return = record.get('current_return', 0)
                             is_new = record.get('is_new', False)
+                            
+                            # 获取当前价格和涨跌幅
+                            daily_prices = record.get('daily_prices', {})
+                            entry_price = record.get('entry_price', 0)
+                            if daily_prices:
+                                latest_date = max(daily_prices.keys())
+                                current_price = daily_prices[latest_date]
+                            else:
+                                current_price = entry_price
+                            
+                            # 实时计算涨跌幅
+                            if entry_price > 0 and current_price > 0:
+                                current_return = ((current_price - entry_price) / entry_price) * 100
+                            else:
+                                current_return = 0
+                            
+                            # 实时判断方向正确性（不需要等到追踪到期）
+                            if direction == 'bullish':
+                                direction_correct = current_return > 0
+                            elif direction == 'bearish':
+                                direction_correct = current_return < 0
+                            else:
+                                direction_correct = None
                             
                             # 方向图标
                             if direction == 'bullish':
@@ -1951,24 +2000,16 @@ def main():
                             elif direction_correct is False:
                                 correct_icon = "❌ 错误"
                             else:
-                                correct_icon = "⏳ 待定"
+                                correct_icon = "⚪ 不判定"
                             
                             # 新标的标注
                             symbol_display = f"🆕 {symbol}" if is_new else symbol
-                            
-                            # 获取当前价格
-                            daily_prices = record.get('daily_prices', {})
-                            if daily_prices:
-                                latest_date = max(daily_prices.keys())
-                                current_price = daily_prices[latest_date]
-                            else:
-                                current_price = record.get('entry_price', 0)
                             
                             verify_rows.append({
                                 '标的': symbol_display,
                                 '信号方向': dir_icon,
                                 '信号类型': record.get('signal_type', '')[:20],
-                                'D0价格': record.get('entry_price', 0),
+                                'D0价格': entry_price,
                                 '当前价格': current_price,
                                 '涨跌幅%': current_return,
                                 '方向正确': correct_icon,
@@ -2019,16 +2060,36 @@ def main():
                             signal_type_stats = {}
                             for symbol, record in tracking_data.items():
                                 sig_type = record.get('signal_type', '未知')[:20]
-                                direction_correct = record.get('direction_correct', None)
+                                direction = record.get('signal_direction', 'neutral')
+                                
+                                # 实时计算涨跌幅
+                                entry_price = record.get('entry_price', 0)
+                                daily_prices = record.get('daily_prices', {})
+                                if daily_prices and entry_price > 0:
+                                    latest_date = max(daily_prices.keys())
+                                    current_price = daily_prices[latest_date]
+                                    current_return = ((current_price - entry_price) / entry_price) * 100
+                                else:
+                                    current_return = 0
+                                
+                                # 实时判断方向正确性
+                                if direction == 'bullish':
+                                    direction_correct = current_return > 0
+                                elif direction == 'bearish':
+                                    direction_correct = current_return < 0
+                                else:
+                                    direction_correct = None
                                 
                                 if sig_type not in signal_type_stats:
-                                    signal_type_stats[sig_type] = {'total': 0, 'correct': 0, 'wrong': 0}
+                                    signal_type_stats[sig_type] = {'total': 0, 'correct': 0, 'wrong': 0, 'neutral': 0}
                                 
                                 signal_type_stats[sig_type]['total'] += 1
                                 if direction_correct is True:
                                     signal_type_stats[sig_type]['correct'] += 1
                                 elif direction_correct is False:
                                     signal_type_stats[sig_type]['wrong'] += 1
+                                else:
+                                    signal_type_stats[sig_type]['neutral'] += 1
                             
                             type_rows = []
                             for sig_type, data in signal_type_stats.items():
@@ -2039,7 +2100,7 @@ def main():
                                     '总数': data['total'],
                                     '正确': data['correct'],
                                     '错误': data['wrong'],
-                                    '待定': data['total'] - judged,
+                                    '中性(不判定)': data['neutral'],
                                     '正确率': f"{accuracy:.1f}%"
                                 })
                             
