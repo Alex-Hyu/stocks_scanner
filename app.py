@@ -209,7 +209,12 @@ def load_tracking_from_gsheets():
         return None
     
     try:
-        spreadsheet = client.open(GSHEETS_SPREADSHEET_NAME)
+        # 尝试打开文档
+        try:
+            spreadsheet = client.open(GSHEETS_SPREADSHEET_NAME)
+        except gspread.exceptions.SpreadsheetNotFound:
+            st.warning(f"⚠️ 找不到Google Sheets文档 '{GSHEETS_SPREADSHEET_NAME}'。请先创建此文档并共享给Service Account。")
+            return None
         
         # 尝试获取工作表，如果不存在则创建
         try:
@@ -222,21 +227,43 @@ def load_tracking_from_gsheets():
             return {}
         
         # 读取所有数据
-        records = worksheet.get_all_records()
+        all_values = worksheet.get_all_values()
         
+        # 如果只有表头或空表
+        if len(all_values) <= 1:
+            return {}
+        
+        # 解析数据（跳过表头）
         tracking_data = {}
-        for record in records:
-            symbol = record.get('symbol', '')
-            data_json = record.get('data_json', '{}')
-            if symbol and data_json:
-                try:
-                    tracking_data[symbol] = json.loads(data_json)
-                except:
-                    pass
+        headers = all_values[0]
+        
+        # 找到symbol和data_json列的索引
+        try:
+            symbol_idx = headers.index('symbol')
+            data_idx = headers.index('data_json')
+        except ValueError:
+            # 表头不正确，重新初始化
+            worksheet.clear()
+            worksheet.append_row(['symbol', 'data_json'])
+            return {}
+        
+        for row in all_values[1:]:
+            if len(row) > max(symbol_idx, data_idx):
+                symbol = row[symbol_idx]
+                data_json = row[data_idx]
+                if symbol and data_json:
+                    try:
+                        tracking_data[symbol] = json.loads(data_json)
+                    except json.JSONDecodeError:
+                        pass
         
         return tracking_data
+        
+    except gspread.exceptions.APIError as e:
+        st.warning(f"Google Sheets API错误: {e}")
+        return None
     except Exception as e:
-        st.warning(f"从Google Sheets加载数据失败: {e}")
+        st.warning(f"从Google Sheets加载数据失败: {type(e).__name__}: {e}")
         return None
 
 def save_tracking_to_gsheets(tracking_data):
@@ -2033,7 +2060,11 @@ def main():
                     # ===== Squeeze追踪面板 =====
                     st.subheader("📈 Squeeze追踪面板")
                     
-                    # Google Sheets连接状态显示
+                    # 加载追踪数据（这会设置gsheets_connected状态）
+                    tracking_data = load_tracking_data()
+                    today_str = datetime.now().strftime('%Y-%m-%d')
+                    
+                    # Google Sheets连接状态显示（在load之后）
                     gsheets_status = st.session_state.get('gsheets_connected', False)
                     if gsheets_status:
                         st.caption(f"☁️ **云端同步已启用** (Google Sheets: {GSHEETS_SPREADSHEET_NAME}) | Squeeze标准: ≥{SQUEEZE_THRESHOLD}%涨幅")
@@ -2041,10 +2072,6 @@ def main():
                         st.caption(f"💾 **本地存储模式** ({os.path.abspath(TRACKING_FILE)}) | Squeeze标准: ≥{SQUEEZE_THRESHOLD}%涨幅")
                         if GSHEETS_AVAILABLE:
                             st.info("💡 Google Sheets凭证未配置或连接失败，数据仅保存在本地。重启后数据可能丢失。")
-                    
-                    # 加载追踪数据
-                    tracking_data = load_tracking_data()
-                    today_str = datetime.now().strftime('%Y-%m-%d')
                     
                     # 识别新标的并添加到追踪
                     new_symbols = []
