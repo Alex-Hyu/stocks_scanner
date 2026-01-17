@@ -1144,18 +1144,41 @@ def main():
                     
                     def get_option_structure(row):
                         """
-                        判断期权结构
+                        判断期权结构（放宽条件，使用OR逻辑）
                         - Delta Ratio = Put Delta ÷ Call Delta（方向性敞口）
                         - Gamma Ratio = Put Gamma ÷ Call Gamma（加速效应）
+                        
+                        【修正逻辑】
+                        - Put主导: DR < -2 OR GR > 1.5（满足其一即可）
+                        - Call主导: DR > -1 OR GR < 1（满足其一即可）
+                        - 中性: 两者都在中间范围
                         """
                         dr = row['Delta Ratio']
                         gr = row['Gamma Ratio']
                         if pd.isna(dr) or pd.isna(gr):
                             return "数据缺失", "unknown"
-                        if dr > -1 and gr < 1:
-                            return "Call主导", "call_dominant"
-                        elif dr < -3 and gr > 2:
+                        
+                        # Put主导判断（放宽，OR逻辑）
+                        is_put_by_dr = dr < -2
+                        is_put_by_gr = gr > 1.5
+                        
+                        # Call主导判断（放宽，OR逻辑）
+                        is_call_by_dr = dr > -1
+                        is_call_by_gr = gr < 1
+                        
+                        # 优先判断明确的主导方向
+                        if dr < -3 or gr > 2:
+                            # 强Put主导
                             return "Put主导", "put_dominant"
+                        elif dr > -0.5 or gr < 0.8:
+                            # 强Call主导
+                            return "Call主导", "call_dominant"
+                        elif is_put_by_dr or is_put_by_gr:
+                            # 弱Put主导
+                            return "Put偏多", "put_leaning"
+                        elif is_call_by_dr or is_call_by_gr:
+                            # 弱Call主导
+                            return "Call偏多", "call_leaning"
                         else:
                             return "中性", "neutral"
                     
@@ -1212,10 +1235,20 @@ def main():
                         else:
                             return "无磁吸", dist_pct
                     
-                    def get_trade_signal(position, structure, vol_regime, options_impact, high_oi_thresh):
+                    def get_trade_signal(position, structure, vol_regime, options_impact, high_oi_thresh, dist_pw, dist_cw, next_gamma):
                         """
-                        生成交易信号 - 位置×结构×波动环境
+                        生成交易信号 - 基于做市商盈利逻辑
+                        
+                        【核心原理】
+                        - 做市商卖期权收权利金，希望期权到期作废
+                        - Put主导/Put偏多 = MM大量Short Put → MM希望价格涨（杀Put）→ Squeeze Up潜力
+                        - Call主导/Call偏多 = MM大量Short Call → MM希望价格跌（杀Call）→ Squeeze Down风险
+                        - Options Impact高 + Next Exp Gamma集中 = Squeeze力度大
                         """
+                        # 判断Squeeze条件
+                        has_squeeze_potential = (options_impact >= 20 and 
+                                                next_gamma is not None and not pd.isna(next_gamma) and next_gamma >= 0.25)
+                        
                         if options_impact > high_oi_thresh:
                             confidence = "⭐⭐⭐"
                         elif options_impact > high_oi_thresh * 0.6:
@@ -1223,29 +1256,105 @@ def main():
                         else:
                             confidence = "⭐"
                         
-                        # 核心信号矩阵
-                        signal_matrix = {
-                            ("近Call Wall", "Call主导"): (f"🟢 突破做多 {confidence}", "CW是天花板，但Call主导→突破后MM买股对冲→squeeze向上", "bullish"),
-                            ("近Call Wall", "Put主导"): (f"🔴 压力做空 {confidence}", "CW阻力+Put主导→上攻乏力，回落概率高", "bearish"),
-                            ("近Call Wall", "中性"): ("⚪ CW观望", "阻力位，结构中性，等突破确认", "neutral"),
-                            ("近Put Wall", "Call主导"): (f"🟢 反弹做多 {confidence}", "PW是地板+Call主导→MM买股对冲支撑→反弹动能强", "bullish"),
-                            ("近Put Wall", "Put主导"): (f"🔴 破位做空 {confidence}", "PW支撑但Put主导→跌破后MM卖股对冲→squeeze向下", "bearish"),
-                            ("近Put Wall", "中性"): ("⚪ PW观望", "支撑位，结构中性，等破位确认", "neutral"),
-                            ("中间区域", "Call主导"): ("🟢 偏多观察", "Call主导但未到关键位，等待时机", "bullish_watch"),
-                            ("中间区域", "Put主导"): ("🔴 偏空观察", "Put主导但未到关键位，等待时机", "bearish_watch"),
-                            ("中间区域", "中性"): ("⚪ 中性", "结构中性+位置中性，无明确方向", "neutral"),
-                        }
+                        # 归类期权结构
+                        is_put_side = structure in ["Put主导", "Put偏多"]
+                        is_call_side = structure in ["Call主导", "Call偏多"]
+                        is_strong_put = structure == "Put主导"
+                        is_strong_call = structure == "Call主导"
                         
-                        base_signal = signal_matrix.get((position, structure), ("❓ 未知", "数据异常", "unknown"))
+                        # ===== 新的信号矩阵（基于做市商盈利逻辑）=====
                         
-                        # 波动环境修正
-                        signal, logic, sig_type = base_signal
-                        if vol_regime == "均值回归" and sig_type in ["bullish", "bearish"]:
-                            logic += " | ⚠️均值回归环境，突破/破位难度大"
-                        elif vol_regime == "趋势/高波动" and sig_type in ["bullish", "bearish"]:
-                            logic += " | ✅趋势环境，顺势信号更可靠"
+                        # 1. Put主导/偏多情况：MM希望价格涨（杀Put）
+                        if is_put_side:
+                            if dist_pw > 10 and dist_cw < 20:
+                                # Put侧 + 远离PW + 接近CW = Squeeze Up潜力
+                                if has_squeeze_potential:
+                                    strength = "⭐⭐⭐" if is_strong_put else "⭐⭐"
+                                    return (f"🟢 Squeeze Up潜力 {strength}", 
+                                           f"{structure}+OI={options_impact:.0f}%+NEG={next_gamma*100:.0f}%，MM有动机推涨杀Put", 
+                                           "bullish")
+                                else:
+                                    return (f"🟢 偏多观察 {confidence}", 
+                                           f"{structure}+远离PW，但Squeeze条件不完整", 
+                                           "bullish_watch")
+                            elif dist_cw < 0:
+                                # 已突破CW = Squeeze Up进行中
+                                return (f"🔥 Squeeze Up进行中 {confidence}", 
+                                       f"{structure}+突破CW，MM被迫买股对冲，加速上涨", 
+                                       "bullish")
+                            elif dist_cw < 5:
+                                # 接近CW = 突破前
+                                if has_squeeze_potential:
+                                    return (f"🟢 接近突破 {confidence}", 
+                                           f"{structure}+近CW，突破后可能Squeeze Up", 
+                                           "bullish")
+                                else:
+                                    return (f"⏳ 观察突破 {confidence}", f"{structure}+近CW，等待突破确认", "neutral")
+                            elif dist_pw < 5:
+                                # Put侧 + 近PW = 风险
+                                if has_squeeze_potential:
+                                    return (f"⚠️ 方向待定 {confidence}", 
+                                           f"{structure}+近PW，需观察是否守住支撑", 
+                                           "neutral")
+                                else:
+                                    return ("⚠️ 支撑观察", f"{structure}+近PW，观察是否守住", "neutral")
+                            else:
+                                # 中间区域
+                                if has_squeeze_potential:
+                                    return (f"🟢 Squeeze Up蓄势 {confidence}", 
+                                           f"{structure}+OI高+NEG高，等待接近CW触发", 
+                                           "bullish_watch")
+                                else:
+                                    return (f"⏳ 偏多蓄势 {confidence}", f"{structure}但条件不完整，等待时机", "bullish_watch")
                         
-                        return signal, logic, sig_type
+                        # 2. Call主导/偏多情况：MM希望价格跌（杀Call）
+                        elif is_call_side:
+                            if dist_cw > 10 and dist_pw < 20:
+                                # Call侧 + 远离CW + 接近PW = Squeeze Down风险
+                                if has_squeeze_potential:
+                                    strength = "⭐⭐⭐" if is_strong_call else "⭐⭐"
+                                    return (f"🔴 Squeeze Down风险 {strength}", 
+                                           f"{structure}+OI={options_impact:.0f}%+NEG={next_gamma*100:.0f}%，MM有动机压价杀Call", 
+                                           "bearish")
+                                else:
+                                    return (f"🔴 偏空观察 {confidence}", 
+                                           f"{structure}+远离CW，但Squeeze条件不完整", 
+                                           "bearish_watch")
+                            elif dist_pw < 0:
+                                # 已跌破PW = Squeeze Down进行中
+                                return (f"💥 Squeeze Down进行中 {confidence}", 
+                                       f"{structure}+跌破PW，MM被迫卖股对冲，加速下跌", 
+                                       "bearish")
+                            elif dist_pw < 5:
+                                # 接近PW = 破位前
+                                if has_squeeze_potential:
+                                    return (f"🔴 接近破位 {confidence}", 
+                                           f"{structure}+近PW，跌破后可能Squeeze Down", 
+                                           "bearish")
+                                else:
+                                    return (f"⏳ 观察破位 {confidence}", f"{structure}+近PW，等待破位确认", "neutral")
+                            elif dist_cw < 5:
+                                # Call侧 + 近CW = 可能受阻
+                                return (f"⚠️ 阻力观察 {confidence}", f"{structure}+近CW，MM有动机压价", "bearish_watch")
+                            else:
+                                # 中间区域
+                                if has_squeeze_potential:
+                                    return (f"🔴 Squeeze Down蓄势 {confidence}", 
+                                           f"{structure}+OI高+NEG高，等待接近PW触发", 
+                                           "bearish_watch")
+                                else:
+                                    return (f"⏳ 偏空蓄势 {confidence}", f"{structure}但条件不完整，等待时机", "bearish_watch")
+                        
+                        # 3. 中性情况
+                        else:
+                            if position == "近Call Wall":
+                                return ("⚪ CW观望", "结构中性+近CW，等待方向确认", "neutral")
+                            elif position == "近Put Wall":
+                                return ("⚪ PW观望", "结构中性+近PW，等待方向确认", "neutral")
+                            else:
+                                return ("⚪ 中性", "结构中性+位置中性，无明确方向", "neutral")
+                        
+                        return ("❓ 未知", "数据异常", "unknown")
                     
                     def detect_special_signals(row, dist_to_pw, dist_to_cw):
                         """
@@ -1312,13 +1421,26 @@ def main():
                                 if not has_bounce_or_trap:
                                     signals.append(("🟠 Gamma集中警告", f"{next_gamma*100:.0f}%将在下次到期释放（官方警戒线25%）", "gamma_risk_medium"))
                         
-                        # 3. 空头挤压风险（极度偏空+低成交+近支撑但未破）
-                        if dr < -5 and (vr is None or pd.isna(vr) or vr < 0.5) and 0 < dist_to_pw < 10:
-                            signals.append(("⚠️ 空头挤压风险", "极度偏空+低成交+近支撑→空头拥挤，逆势反弹风险", "short_squeeze"))
+                        # 3. Squeeze Up潜力提示（Put主导+远离PW+高OI/NEG）
+                        # 核心逻辑：Put主导=MM Short Put多→MM希望涨→有动机推涨杀Put
+                        is_put_dominant = dr < -3 or gr > 2
+                        has_squeeze_condition = (oi >= 20 and next_gamma is not None and not pd.isna(next_gamma) and next_gamma > 0.25)
                         
-                        # 4. 多头踩踏风险（偏多+放量+近阻力）
-                        if dr > -1 and vr is not None and not pd.isna(vr) and vr > 1.5 and dist_to_cw < 10:
-                            signals.append(("⚠️ 多头回撤风险", "偏多+放量+近阻力→获利盘抛压", "long_liquidation"))
+                        if is_put_dominant and dist_to_pw > 10 and has_squeeze_condition:
+                            if dist_to_cw < 5:
+                                signals.append(("🚀 Squeeze Up临界点", f"Put主导+远离PW+近CW，突破后MM买股对冲加速上涨", "squeeze_up_imminent"))
+                            elif dist_to_cw < 15:
+                                signals.append(("🟢 Squeeze Up潜力", f"Put主导+OI={oi:.0f}%+NEG={next_gamma*100:.0f}%，MM有动机推涨", "squeeze_up_potential"))
+                        
+                        # 4. Squeeze Down风险提示（Call主导+远离CW+高OI/NEG）
+                        # 核心逻辑：Call主导=MM Short Call多→MM希望跌→有动机压价杀Call
+                        is_call_dominant = dr > -1 or gr < 1
+                        
+                        if is_call_dominant and dist_to_cw > 10 and has_squeeze_condition:
+                            if dist_to_pw < 5:
+                                signals.append(("💥 Squeeze Down临界点", f"Call主导+远离CW+近PW，跌破后MM卖股对冲加速下跌", "squeeze_down_imminent"))
+                            elif dist_to_pw < 15:
+                                signals.append(("🔴 Squeeze Down风险", f"Call主导+OI={oi:.0f}%+NEG={next_gamma*100:.0f}%，MM有动机压价", "squeeze_down_risk"))
                         
                         # 5. Delta Ratio与P/C OI一致性验证
                         if pc_oi is not None and not pd.isna(pc_oi):
@@ -1389,14 +1511,17 @@ def main():
                     sg_df['Gamma_Magnet'] = magnet_results.apply(lambda x: x[0])
                     sg_df['Dist_to_KGS'] = magnet_results.apply(lambda x: x[1])
                     
-                    # 交易信号（整合波动环境）
+                    # 交易信号（基于做市商盈利逻辑）
                     signal_results = sg_df.apply(
                         lambda row: get_trade_signal(
                             row['Price_Position'], 
                             row['Option_Structure'],
                             row['Vol_Regime'],
                             row['Options Impact'], 
-                            high_oi_threshold
+                            high_oi_threshold,
+                            row['Dist_PW_Calc'],  # 距离Put Wall
+                            row['Dist_CW_Calc'],  # 距离Call Wall
+                            row.get('Next Exp Gamma', None)  # Next Exp Gamma
                         ), axis=1)
                     sg_df['Trade_Signal'] = signal_results.apply(lambda x: x[0])
                     sg_df['Signal_Logic'] = signal_results.apply(lambda x: x[1])
@@ -1454,7 +1579,7 @@ def main():
                     
                     # ===== 🟢 高确信做多信号 =====
                     st.subheader("🟢 高确信做多信号")
-                    st.caption("位置×结构: 近CW+Call主导=突破做多 | 近PW+Call主导=反弹做多")
+                    st.caption("核心逻辑: Put主导+高OI+高NEG+远离PW = MM有动机推涨杀Put → Squeeze Up潜力")
                     
                     bullish_signals = sg_filtered[sg_filtered['Signal_Type'] == 'bullish'].copy()
                     bullish_signals = bullish_signals.sort_values('Options Impact', ascending=False)
@@ -1488,7 +1613,7 @@ def main():
                     
                     # ===== 🔴 高确信做空信号 =====
                     st.subheader("🔴 高确信做空信号")
-                    st.caption("位置×结构: 近CW+Put主导=压力做空 | 近PW+Put主导=破位做空")
+                    st.caption("核心逻辑: Call主导+高OI+高NEG+远离CW = MM有动机压价杀Call → Squeeze Down风险")
                     
                     bearish_signals = sg_filtered[sg_filtered['Signal_Type'] == 'bearish'].copy()
                     bearish_signals = bearish_signals.sort_values('Options Impact', ascending=False)
