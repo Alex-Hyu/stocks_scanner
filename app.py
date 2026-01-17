@@ -16,6 +16,14 @@ import os
 import warnings
 warnings.filterwarnings('ignore')
 
+# Google Sheets集成
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+    GSHEETS_AVAILABLE = True
+except ImportError:
+    GSHEETS_AVAILABLE = False
+
 # ============================================================
 # 页面配置
 # ============================================================
@@ -30,6 +38,11 @@ st.set_page_config(
 # ============================================================
 TRACKING_FILE = "./squeeze_tracking.json"
 SQUEEZE_THRESHOLD = 5.0  # 5%涨幅算squeeze确认
+
+# Google Sheets配置
+GSHEETS_CREDENTIALS_FILE = "./google_credentials.json"  # 你的API凭证文件
+GSHEETS_SPREADSHEET_NAME = "SpotGamma_Tracking"  # Google Sheets文档名称
+GSHEETS_WORKSHEET_NAME = "tracking_data"  # 工作表名称
 
 # ============================================================
 # 常量定义
@@ -155,20 +168,170 @@ def get_stock_pool(pool_name: str) -> list:
 # Squeeze追踪模块
 # ============================================================
 
-def load_tracking_data():
-    """加载追踪数据"""
+# ===== Google Sheets 集成函数 =====
+
+def get_gsheets_client():
+    """获取Google Sheets客户端"""
+    if not GSHEETS_AVAILABLE:
+        return None
+    
+    try:
+        # 尝试从Streamlit secrets读取凭证
+        if hasattr(st, 'secrets') and 'gcp_service_account' in st.secrets:
+            creds = Credentials.from_service_account_info(
+                st.secrets['gcp_service_account'],
+                scopes=[
+                    'https://www.googleapis.com/auth/spreadsheets',
+                    'https://www.googleapis.com/auth/drive'
+                ]
+            )
+        # 尝试从本地文件读取凭证
+        elif os.path.exists(GSHEETS_CREDENTIALS_FILE):
+            creds = Credentials.from_service_account_file(
+                GSHEETS_CREDENTIALS_FILE,
+                scopes=[
+                    'https://www.googleapis.com/auth/spreadsheets',
+                    'https://www.googleapis.com/auth/drive'
+                ]
+            )
+        else:
+            return None
+        
+        return gspread.authorize(creds)
+    except Exception as e:
+        st.warning(f"Google Sheets连接失败: {e}")
+        return None
+
+def load_tracking_from_gsheets():
+    """从Google Sheets加载追踪数据"""
+    client = get_gsheets_client()
+    if not client:
+        return None
+    
+    try:
+        spreadsheet = client.open(GSHEETS_SPREADSHEET_NAME)
+        
+        # 尝试获取工作表，如果不存在则创建
+        try:
+            worksheet = spreadsheet.worksheet(GSHEETS_WORKSHEET_NAME)
+        except gspread.exceptions.WorksheetNotFound:
+            worksheet = spreadsheet.add_worksheet(title=GSHEETS_WORKSHEET_NAME, rows=1000, cols=30)
+            # 创建表头
+            headers = ['symbol', 'data_json']
+            worksheet.append_row(headers)
+            return {}
+        
+        # 读取所有数据
+        records = worksheet.get_all_records()
+        
+        tracking_data = {}
+        for record in records:
+            symbol = record.get('symbol', '')
+            data_json = record.get('data_json', '{}')
+            if symbol and data_json:
+                try:
+                    tracking_data[symbol] = json.loads(data_json)
+                except:
+                    pass
+        
+        return tracking_data
+    except Exception as e:
+        st.warning(f"从Google Sheets加载数据失败: {e}")
+        return None
+
+def save_tracking_to_gsheets(tracking_data):
+    """保存追踪数据到Google Sheets"""
+    client = get_gsheets_client()
+    if not client:
+        return False
+    
+    try:
+        spreadsheet = client.open(GSHEETS_SPREADSHEET_NAME)
+        
+        # 尝试获取工作表，如果不存在则创建
+        try:
+            worksheet = spreadsheet.worksheet(GSHEETS_WORKSHEET_NAME)
+        except gspread.exceptions.WorksheetNotFound:
+            worksheet = spreadsheet.add_worksheet(title=GSHEETS_WORKSHEET_NAME, rows=1000, cols=30)
+        
+        # 清空现有数据（保留表头）
+        worksheet.clear()
+        
+        # 写入表头
+        headers = ['symbol', 'data_json']
+        worksheet.append_row(headers)
+        
+        # 写入数据
+        rows = []
+        for symbol, data in tracking_data.items():
+            data_json = json.dumps(data, ensure_ascii=False, default=str)
+            rows.append([symbol, data_json])
+        
+        if rows:
+            worksheet.append_rows(rows)
+        
+        return True
+    except Exception as e:
+        st.warning(f"保存到Google Sheets失败: {e}")
+        return False
+
+def sync_tracking_data():
+    """同步追踪数据（Google Sheets优先，本地JSON作为备份）"""
+    # 1. 尝试从Google Sheets加载
+    gsheets_data = load_tracking_from_gsheets()
+    
+    # 2. 加载本地JSON
+    local_data = {}
     if os.path.exists(TRACKING_FILE):
         try:
             with open(TRACKING_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                local_data = json.load(f)
         except:
-            return {}
-    return {}
+            pass
+    
+    # 3. 合并数据（Google Sheets优先，但保留本地新增的记录）
+    if gsheets_data is not None:
+        # Google Sheets可用，以它为主
+        merged_data = gsheets_data.copy()
+        
+        # 检查本地是否有新增记录（Google Sheets中没有的）
+        for symbol, record in local_data.items():
+            if symbol not in merged_data:
+                merged_data[symbol] = record
+        
+        return merged_data, True  # 返回数据和是否连接成功
+    else:
+        # Google Sheets不可用，使用本地数据
+        return local_data, False
+
+# ===== 原有的本地存储函数（作为备份）=====
+
+def load_tracking_data():
+    """加载追踪数据（优先从Google Sheets，失败则从本地）"""
+    # 尝试同步
+    data, gsheets_connected = sync_tracking_data()
+    
+    # 存储连接状态到session_state
+    if 'gsheets_connected' not in st.session_state:
+        st.session_state.gsheets_connected = gsheets_connected
+    else:
+        st.session_state.gsheets_connected = gsheets_connected
+    
+    return data
 
 def save_tracking_data(data):
-    """保存追踪数据"""
-    with open(TRACKING_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=2, ensure_ascii=False, default=str)
+    """保存追踪数据（同时保存到Google Sheets和本地JSON）"""
+    # 1. 保存到本地JSON（作为备份）
+    try:
+        with open(TRACKING_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False, default=str)
+    except Exception as e:
+        st.warning(f"本地保存失败: {e}")
+    
+    # 2. 保存到Google Sheets
+    gsheets_success = save_tracking_to_gsheets(data)
+    
+    return gsheets_success
 
 def get_current_price(symbol):
     """获取当前价格"""
@@ -1869,7 +2032,15 @@ def main():
                     
                     # ===== Squeeze追踪面板 =====
                     st.subheader("📈 Squeeze追踪面板")
-                    st.caption(f"追踪文件: {os.path.abspath(TRACKING_FILE)} | Squeeze标准: ≥{SQUEEZE_THRESHOLD}%涨幅")
+                    
+                    # Google Sheets连接状态显示
+                    gsheets_status = st.session_state.get('gsheets_connected', False)
+                    if gsheets_status:
+                        st.caption(f"☁️ **云端同步已启用** (Google Sheets: {GSHEETS_SPREADSHEET_NAME}) | Squeeze标准: ≥{SQUEEZE_THRESHOLD}%涨幅")
+                    else:
+                        st.caption(f"💾 **本地存储模式** ({os.path.abspath(TRACKING_FILE)}) | Squeeze标准: ≥{SQUEEZE_THRESHOLD}%涨幅")
+                        if GSHEETS_AVAILABLE:
+                            st.info("💡 Google Sheets凭证未配置或连接失败，数据仅保存在本地。重启后数据可能丢失。")
                     
                     # 加载追踪数据
                     tracking_data = load_tracking_data()
@@ -1894,14 +2065,21 @@ def main():
                         save_tracking_data(tracking_data)
                         st.success(f"🆕 新增追踪: {', '.join(new_symbols)}")
                     
-                    # 刷新价格按钮
-                    col1, col2, col3 = st.columns([1, 1, 2])
+                    # 操作按钮行
+                    col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
                     with col1:
                         refresh_btn = st.button("🔄 刷新价格", type="primary")
                     with col2:
-                        clear_completed = st.button("🗑️ 清除已完成")
+                        if st.button("☁️ 强制同步云端"):
+                            success = save_tracking_to_gsheets(tracking_data)
+                            if success:
+                                st.success("✅ 已同步到Google Sheets")
+                            else:
+                                st.error("❌ 同步失败，请检查凭证配置")
                     with col3:
-                        if st.button("🗑️ 清空所有追踪记录"):
+                        clear_completed = st.button("🗑️ 清除已完成")
+                    with col4:
+                        if st.button("🗑️ 清空所有追踪"):
                             tracking_data = {}
                             save_tracking_data(tracking_data)
                             st.rerun()
