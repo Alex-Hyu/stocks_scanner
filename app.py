@@ -348,10 +348,22 @@ def calculate_signal_accuracy_stats(tracking_data):
         signal_type_text = record.get('signal_type', '')
         
         # 如果没有signal_direction字段（旧记录），从signal_type文本推断
+        # 【更新】添加新的Squeeze信号关键词
         if not direction or direction == 'neutral':
-            if any(x in signal_type_text for x in ['做多', '反弹', '偏多', 'bullish']):
+            # 做多信号关键词（包括新的Squeeze Up信号）
+            bullish_keywords = [
+                '做多', '反弹', '偏多', 'bullish', 
+                'Squeeze Up', '接近突破', '偏多蓄势', '偏多观察'
+            ]
+            # 做空信号关键词（包括新的Squeeze Down信号）
+            bearish_keywords = [
+                '做空', '压力', '偏空', '破位', 'bearish',
+                'Squeeze Down', '接近破位', '偏空蓄势', '偏空观察'
+            ]
+            
+            if any(x in signal_type_text for x in bullish_keywords):
                 direction = 'bullish'
-            elif any(x in signal_type_text for x in ['做空', '压力', '偏空', '破位', 'bearish']):
+            elif any(x in signal_type_text for x in bearish_keywords):
                 direction = 'bearish'
             else:
                 direction = 'neutral'
@@ -2098,10 +2110,22 @@ def main():
                             is_new = record.get('is_new', False)
                             
                             # 如果没有signal_direction字段（旧记录），从signal_type文本推断
+                            # 【更新】添加新的Squeeze信号关键词
                             if not direction or direction == 'neutral':
-                                if any(x in signal_type_text for x in ['做多', '反弹', '偏多', 'bullish']):
+                                # 做多信号关键词（包括新的Squeeze Up信号）
+                                bullish_keywords = [
+                                    '做多', '反弹', '偏多', 'bullish', 
+                                    'Squeeze Up', '接近突破', '偏多蓄势', '偏多观察'
+                                ]
+                                # 做空信号关键词（包括新的Squeeze Down信号）
+                                bearish_keywords = [
+                                    '做空', '压力', '偏空', '破位', 'bearish',
+                                    'Squeeze Down', '接近破位', '偏空蓄势', '偏空观察'
+                                ]
+                                
+                                if any(x in signal_type_text for x in bullish_keywords):
                                     direction = 'bullish'
-                                elif any(x in signal_type_text for x in ['做空', '压力', '偏空', '破位', 'bearish']):
+                                elif any(x in signal_type_text for x in bearish_keywords):
                                     direction = 'bearish'
                                 else:
                                     direction = 'neutral'
@@ -2206,10 +2230,22 @@ def main():
                                 direction = record.get('signal_direction', '')
                                 
                                 # 如果没有signal_direction字段（旧记录），从signal_type文本推断
+                                # 【更新】添加新的Squeeze信号关键词
                                 if not direction or direction == 'neutral':
-                                    if any(x in sig_type for x in ['做多', '反弹', '偏多', 'bullish']):
+                                    # 做多信号关键词
+                                    bullish_keywords = [
+                                        '做多', '反弹', '偏多', 'bullish', 
+                                        'Squeeze Up', '接近突破', '偏多蓄势', '偏多观察'
+                                    ]
+                                    # 做空信号关键词
+                                    bearish_keywords = [
+                                        '做空', '压力', '偏空', '破位', 'bearish',
+                                        'Squeeze Down', '接近破位', '偏空蓄势', '偏空观察'
+                                    ]
+                                    
+                                    if any(x in sig_type for x in bullish_keywords):
                                         direction = 'bullish'
-                                    elif any(x in sig_type for x in ['做空', '压力', '偏空', '破位', 'bearish']):
+                                    elif any(x in sig_type for x in bearish_keywords):
                                         direction = 'bearish'
                                     else:
                                         direction = 'neutral'
