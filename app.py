@@ -2254,7 +2254,10 @@ def main():
                     # 显示统计
                     stats = calculate_tracking_stats(tracking_data)
                     
-                    stat_col1, stat_col2, stat_col3, stat_col4, stat_col5 = st.columns(5)
+                    # 计算弹簧蓄势数量
+                    spring_tracking_count = sum(1 for r in tracking_data.values() if '弹簧蓄势' in r.get('signal_type', ''))
+                    
+                    stat_col1, stat_col2, stat_col3, stat_col4, stat_col5, stat_col6 = st.columns(6)
                     with stat_col1:
                         st.metric("⏳ 追踪中", stats['tracking'])
                     with stat_col2:
@@ -2262,8 +2265,10 @@ def main():
                     with stat_col3:
                         st.metric("🎯 确认Squeeze", stats['squeeze'])
                     with stat_col4:
-                        st.metric("❌ 失败", stats['failed'])
+                        st.metric("🔋 弹簧蓄势", spring_tracking_count)
                     with stat_col5:
+                        st.metric("❌ 失败", stats['failed'])
+                    with stat_col6:
                         st.metric("📊 胜率", f"{stats['win_rate']:.1f}%")
                     
                     # 显示追踪表格
@@ -2389,10 +2394,25 @@ def main():
                         # 计算信号正确率统计
                         signal_stats = calculate_signal_accuracy_stats(tracking_data)
                         
+                        # 计算弹簧蓄势的统计
+                        spring_stats = {'total': 0, 'correct': 0}
+                        for symbol, record in tracking_data.items():
+                            if '弹簧蓄势' in record.get('signal_type', ''):
+                                spring_stats['total'] += 1
+                                # 计算当前涨跌幅
+                                entry_price = record.get('entry_price', 0)
+                                daily_prices = record.get('daily_prices', {})
+                                if daily_prices and entry_price > 0:
+                                    latest_date = max(daily_prices.keys())
+                                    current_price = daily_prices[latest_date]
+                                    current_return = ((current_price - entry_price) / entry_price) * 100
+                                    if current_return > 0:  # 弹簧蓄势是做多信号，涨了就正确
+                                        spring_stats['correct'] += 1
+                        
                         # 显示统计
                         st.markdown("#### 📊 信号正确率统计")
                         
-                        sig_col1, sig_col2, sig_col3, sig_col4 = st.columns(4)
+                        sig_col1, sig_col2, sig_col3, sig_col4, sig_col5 = st.columns(5)
                         with sig_col1:
                             bullish_total = signal_stats['bullish']['total']
                             bullish_correct = signal_stats['bullish']['correct']
@@ -2410,12 +2430,21 @@ def main():
                                 f"{bearish_correct}/{bearish_total} 正确"
                             )
                         with sig_col3:
+                            spring_total = spring_stats['total']
+                            spring_correct = spring_stats['correct']
+                            spring_accuracy = (spring_correct / spring_total * 100) if spring_total > 0 else 0
+                            st.metric(
+                                f"🔋 弹簧蓄势 ({spring_total}个)", 
+                                f"{spring_accuracy:.1f}%",
+                                f"{spring_correct}/{spring_total} 正确"
+                            )
+                        with sig_col4:
                             st.metric(
                                 "⚪ 中性信号", 
                                 f"{signal_stats['neutral']['total']}个",
                                 "不计入正确率"
                             )
-                        with sig_col4:
+                        with sig_col5:
                             overall_total = signal_stats['overall']['total']
                             overall_correct = signal_stats['overall']['correct']
                             st.metric(
