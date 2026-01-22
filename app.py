@@ -543,12 +543,12 @@ def calculate_signal_accuracy_stats(tracking_data):
             # 做多信号关键词
             bullish_keywords = [
                 '做多', '反弹', '偏多', 'bullish', 
-                'Squeeze Up', '突破CW', 'PW支撑区'
+                'Squeeze Up', '突破CW', 'PW支撑区', '弹簧蓄势', '正Gamma轧空'
             ]
             # 做空信号关键词
             bearish_keywords = [
                 '做空', '压力', '偏空', '破位', 'bearish',
-                'Squeeze Down', '跌破PW', 'CW阻力区'
+                'Squeeze Down', '跌破PW', 'CW阻力区', '负Gamma螺旋'
             ]
             
             if any(x in signal_type_text for x in bullish_keywords):
@@ -1448,7 +1448,7 @@ def main():
                         else:
                             return "无磁吸", dist_pct
                     
-                    def get_trade_signal(position, structure, vol_regime, options_impact, high_oi_thresh, dist_pw, dist_cw, next_gamma):
+                    def get_trade_signal(position, structure, vol_regime, options_impact, high_oi_thresh, dist_pw, dist_cw, next_gamma, gr=None, vr=None):
                         """
                         生成交易信号 - 基于价格区域 + 做市商盈利逻辑
                         
@@ -1460,8 +1460,12 @@ def main():
                            - 中间区域（>5%）→ 看期权结构判断方向
                         
                         2. 期权结构：
-                           - Put主导 = MM希望涨（杀Put）→ 阻力可能被突破
-                           - Call主导 = MM希望跌（杀Call）→ 支撑可能被跌破
+                           - Put主导 = MM处于负Delta，希望涨（杀Put）
+                           - Call主导 = MM处于正Delta，希望跌（杀Call）
+                        
+                        3. 特殊信号：
+                           - 负Gamma螺旋：Put主导+跌破PW → MM被迫追涨杀跌
+                           - 弹簧效应：GR极高+VR极低 → Put动能衰竭，超跌反弹潜力
                         """
                         # 判断Squeeze条件
                         has_squeeze_potential = (options_impact >= 20 and 
@@ -1489,15 +1493,27 @@ def main():
                         
                         # 1. 已突破CW（dist_cw < 0）
                         if dist_cw < 0:
-                            return (f"🔥 突破CW加速 {confidence}", 
-                                   f"价格已突破Call Wall，MM被迫买股对冲，加速上涨", 
-                                   "bullish")
+                            # Call主导+突破CW = 正Gamma轧空，更强
+                            if is_call_side:
+                                return (f"🔥⚡ 正Gamma轧空 {confidence}", 
+                                       f"Call主导+突破CW，MM被迫疯狂买股对冲，暴涨风险！", 
+                                       "bullish")
+                            else:
+                                return (f"🔥 突破CW加速 {confidence}", 
+                                       f"价格已突破Call Wall，MM被迫买股对冲，加速上涨", 
+                                       "bullish")
                         
-                        # 2. 已跌破PW（dist_pw < 0）
+                        # 2. 已跌破PW（dist_pw < 0）- 区分负Gamma螺旋
                         if dist_pw < 0:
-                            return (f"💥 跌破PW加速 {confidence}", 
-                                   f"价格已跌破Put Wall，MM被迫卖股对冲，加速下跌", 
-                                   "bearish")
+                            if is_put_side:
+                                # Put主导+跌破PW = 负Gamma螺旋，最危险
+                                return (f"💥⚠️ 负Gamma螺旋 {confidence}", 
+                                       f"{structure}+跌破PW，MM从'希望涨'变'绝望抛'，跌幅可能失控！", 
+                                       "bearish")
+                            else:
+                                return (f"💥 跌破PW加速 {confidence}", 
+                                       f"价格已跌破Put Wall，MM被迫卖股对冲，加速下跌", 
+                                       "bearish")
                         
                         # 3. Pin Zone钉价区（两边都在5%以内）
                         if dist_cw <= 5 and dist_pw <= 5:
@@ -1565,6 +1581,13 @@ def main():
                                            "neutral")
                         
                         # ===== 中间区域（dist_pw > 5% AND dist_cw > 5%）：看期权结构 =====
+                        
+                        # 【弹簧效应检测】GR极高 + VR极低 = Put动能衰竭，超跌反弹潜力
+                        if gr is not None and vr is not None:
+                            if gr > 2 and vr < 0.3:
+                                return (f"🔋 弹簧蓄势 {confidence}", 
+                                       f"GR={gr:.1f}极高+VR={vr:.2f}极低，Put动能衰竭，存在超跌反弹潜力！", 
+                                       "bullish_watch")
                         
                         # Put侧（主导/偏多/轻微）：MM希望价格涨（杀Put）
                         if is_put_side:
@@ -1777,7 +1800,9 @@ def main():
                             high_oi_threshold,
                             row['Dist_PW_Calc'],  # 距离Put Wall
                             row['Dist_CW_Calc'],  # 距离Call Wall
-                            row.get('Next Exp Gamma', None)  # Next Exp Gamma
+                            row.get('Next Exp Gamma', None),  # Next Exp Gamma
+                            row.get('Gamma Ratio', None),  # GR - 弹簧效应检测
+                            row.get('Volume Ratio', None)   # VR - 弹簧效应检测
                         ), axis=1)
                     sg_df['Trade_Signal'] = signal_results.apply(lambda x: x[0])
                     sg_df['Signal_Logic'] = signal_results.apply(lambda x: x[1])
@@ -2374,12 +2399,12 @@ def main():
                                 # 做多信号关键词
                                 bullish_keywords = [
                                     '做多', '反弹', '偏多', 'bullish', 
-                                    'Squeeze Up', '突破CW', 'PW支撑区'
+                                    'Squeeze Up', '突破CW', 'PW支撑区', '弹簧蓄势', '正Gamma轧空'
                                 ]
                                 # 做空信号关键词
                                 bearish_keywords = [
                                     '做空', '压力', '偏空', '破位', 'bearish',
-                                    'Squeeze Down', '跌破PW', 'CW阻力区'
+                                    'Squeeze Down', '跌破PW', 'CW阻力区', '负Gamma螺旋'
                                 ]
                                 
                                 if any(x in signal_type_text for x in bullish_keywords):
@@ -2494,12 +2519,12 @@ def main():
                                     # 做多信号关键词
                                     bullish_keywords = [
                                         '做多', '反弹', '偏多', 'bullish', 
-                                        'Squeeze Up', '突破CW', 'PW支撑区'
+                                        'Squeeze Up', '突破CW', 'PW支撑区', '弹簧蓄势', '正Gamma轧空'
                                     ]
                                     # 做空信号关键词
                                     bearish_keywords = [
                                         '做空', '压力', '偏空', '破位', 'bearish',
-                                        'Squeeze Down', '跌破PW', 'CW阻力区'
+                                        'Squeeze Down', '跌破PW', 'CW阻力区', '负Gamma螺旋'
                                     ]
                                     
                                     if any(x in sig_type for x in bullish_keywords):
