@@ -1800,9 +1800,9 @@ def main():
                             high_oi_threshold,
                             row['Dist_PW_Calc'],  # 距离Put Wall
                             row['Dist_CW_Calc'],  # 距离Call Wall
-                            row.get('Next Exp Gamma', None),  # Next Exp Gamma
-                            row.get('Gamma Ratio', None),  # GR - 弹簧效应检测
-                            row.get('Volume Ratio', None)   # VR - 弹簧效应检测
+                            row['Next Exp Gamma'] if 'Next Exp Gamma' in row and pd.notna(row['Next Exp Gamma']) else None,
+                            row['Gamma Ratio'] if 'Gamma Ratio' in row and pd.notna(row['Gamma Ratio']) else None,
+                            row['Volume Ratio'] if 'Volume Ratio' in row and pd.notna(row['Volume Ratio']) else None
                         ), axis=1)
                     sg_df['Trade_Signal'] = signal_results.apply(lambda x: x[0])
                     sg_df['Signal_Logic'] = signal_results.apply(lambda x: x[1])
@@ -1819,12 +1819,13 @@ def main():
                     st.subheader("📊 分析概览")
                     
                     # 统计各类信号
-                    col1, col2, col3, col4, col5 = st.columns(5)
+                    col1, col2, col3, col4, col5, col6 = st.columns(6)
                     
                     bullish_count = len(sg_filtered[sg_filtered['Signal_Type'] == 'bullish'])
                     bearish_count = len(sg_filtered[sg_filtered['Signal_Type'] == 'bearish'])
                     watch_bull = len(sg_filtered[sg_filtered['Signal_Type'] == 'bullish_watch'])
                     watch_bear = len(sg_filtered[sg_filtered['Signal_Type'] == 'bearish_watch'])
+                    spring_count = len(sg_filtered[sg_filtered['Trade_Signal'].str.contains('弹簧蓄势', na=False)])
                     
                     # 统计波动环境
                     mean_rev_count = len(sg_filtered[sg_filtered['Vol_Regime_Type'] == 'mean_reversion'])
@@ -1835,10 +1836,12 @@ def main():
                     with col2:
                         st.metric("🔴 高确信做空", bearish_count)
                     with col3:
-                        st.metric("🟢 偏多观察", watch_bull)
+                        st.metric("🔋 弹簧蓄势", spring_count)
                     with col4:
-                        st.metric("🔴 偏空观察", watch_bear)
+                        st.metric("🟢 偏多观察", watch_bull)
                     with col5:
+                        st.metric("🔴 偏空观察", watch_bear)
+                    with col6:
                         st.metric("📈 趋势环境", trending_count, help="价格<Hedge Wall，高波动")
                     
                     st.caption(f"已分析 {len(sg_filtered)} 只标的 (Options Impact ≥ {min_options_impact}%)")
@@ -1924,6 +1927,41 @@ def main():
                                 st.divider()
                     else:
                         st.info("无高确信做空信号")
+                    
+                    # ===== 🔋 弹簧蓄势信号 =====
+                    st.subheader("🔋 弹簧蓄势信号")
+                    st.caption("GR极高(>2) + VR极低(<0.3) = Put动能衰竭，存在超跌反弹潜力！")
+                    
+                    # 筛选弹簧蓄势信号
+                    spring_signals = sg_filtered[sg_filtered['Trade_Signal'].str.contains('弹簧蓄势', na=False)].copy()
+                    spring_signals = spring_signals.sort_values('Options Impact', ascending=False)
+                    
+                    if len(spring_signals) > 0:
+                        for _, row in spring_signals.iterrows():
+                            special_sigs = row['Special_Signals']
+                            special_str = ''
+                            if special_sigs:
+                                special_str = '\n'.join([f"  - {s[0]}: {s[1]}" for s in special_sigs])
+                            
+                            magnet_str = f" | 磁吸: {row['Gamma_Magnet']}" if row['Gamma_Magnet'] else ""
+                            
+                            with st.container():
+                                col1, col2 = st.columns([1, 2])
+                                with col1:
+                                    st.markdown(f"**{row['Symbol']}** ${row['Current Price']:.2f}")
+                                    st.caption(f"{row['Trade_Signal']}")
+                                with col2:
+                                    vr_val = row['Volume Ratio'] if pd.notna(row['Volume Ratio']) else 0
+                                    st.markdown(f"""
+                                    - **位置**: {row['Price_Position']} | **结构**: {row['Option_Structure']} | **环境**: {row['Vol_Regime']}
+                                    - DR: {row['Delta Ratio']:.2f} | **GR: {row['Gamma Ratio']:.2f}** | **VR: {vr_val:.4f}** | OI: {row['Options Impact']:.1f}%{magnet_str}
+                                    - PW: {row['Put Wall']} → 现价 → CW: {row['Call Wall']}
+                                    - 逻辑: {row['Signal_Logic']}
+                                    {f'- **特殊信号**:{chr(10)}{special_str}' if special_str else ''}
+                                    """)
+                                st.divider()
+                    else:
+                        st.info("无弹簧蓄势信号")
                     
                     # ===== 观察名单 =====
                     with st.expander("👀 观察名单（等待接近关键位置）"):
