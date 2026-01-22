@@ -2192,22 +2192,31 @@ def main():
                     
                     # 识别新标的并添加到追踪
                     new_symbols = []
+                    updated_signals = []
                     for _, row in sg_filtered.iterrows():
                         symbol = row['Symbol']
-                        signal_type = row.get('Trade_Signal', '未知信号')
+                        # 正确获取Trade_Signal
+                        signal_type = row['Trade_Signal'] if 'Trade_Signal' in row.index and pd.notna(row['Trade_Signal']) else '未知信号'
                         
                         if symbol not in tracking_data:
                             # 新标的
                             tracking_data[symbol] = add_new_tracking(symbol, row, signal_type, today_str)
                             new_symbols.append(symbol)
                         else:
-                            # 已存在的标的，检查是否需要更新信号（如果信号变化）
+                            # 已存在的标的，更新信号类型（如果信号变化）
+                            old_signal = tracking_data[symbol].get('signal_type', '')
+                            if signal_type != old_signal and signal_type != '未知信号':
+                                tracking_data[symbol]['signal_type'] = signal_type
+                                updated_signals.append(f"{symbol}: {old_signal[:15]}→{signal_type[:15]}")
                             tracking_data[symbol]['is_new'] = False
                     
                     # 保存更新
-                    if new_symbols:
+                    if new_symbols or updated_signals:
                         save_tracking_data(tracking_data)
-                        st.success(f"🆕 新增追踪: {', '.join(new_symbols)}")
+                        if new_symbols:
+                            st.success(f"🆕 新增追踪: {', '.join(new_symbols)}")
+                        if updated_signals:
+                            st.info(f"🔄 信号更新: {'; '.join(updated_signals)}")
                     
                     # 操作按钮行
                     col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
