@@ -1414,18 +1414,38 @@ def main():
                             return "趋势/高波动", "trending"
                     
                     def get_position_zone(row, threshold):
-                        """判断价格位置（相对于Put Wall和Call Wall）"""
+                        """
+                        判断价格位置（相对于Put Wall和Call Wall）
+                        
+                        位置细分（7个区域）：
+                        - 已突破CW / 已跌破PW: 价格已经越过墙
+                        - 临界CW / 临界PW (<1%): 准备入场
+                        - 观察区CW / 观察区PW (1-5%): 进入watchlist
+                        - 中间区域 (>5%): 安全区
+                        """
                         price = row['Current Price']
                         cw = row['Call Wall']
                         pw = row['Put Wall']
                         
-                        dist_to_cw = (cw - price) / price * 100
-                        dist_to_pw = (price - pw) / price * 100
+                        dist_to_cw = (cw - price) / price * 100  # 正=价格在CW下方，负=已突破CW
+                        dist_to_pw = (price - pw) / price * 100  # 正=价格在PW上方，负=已跌破PW
                         
-                        if dist_to_cw < threshold:
-                            return "近Call Wall", dist_to_cw, dist_to_pw
-                        elif dist_to_pw < threshold:
-                            return "近Put Wall", dist_to_cw, dist_to_pw
+                        threshold_critical = 1  # 临界区阈值1%
+                        threshold_observe = threshold  # 观察区阈值(默认5%)
+                        
+                        # 判断位置
+                        if dist_to_cw < 0:  # 价格 > CW，已突破
+                            return "已突破CW", dist_to_cw, dist_to_pw
+                        elif dist_to_pw < 0:  # 价格 < PW，已跌破
+                            return "已跌破PW", dist_to_cw, dist_to_pw
+                        elif dist_to_cw < threshold_critical:  # 距离CW < 1%
+                            return "临界CW", dist_to_cw, dist_to_pw
+                        elif dist_to_pw < threshold_critical:  # 距离PW < 1%
+                            return "临界PW", dist_to_cw, dist_to_pw
+                        elif dist_to_cw < threshold_observe:  # 距离CW 1-5%
+                            return "观察区CW", dist_to_cw, dist_to_pw
+                        elif dist_to_pw < threshold_observe:  # 距离PW 1-5%
+                            return "观察区PW", dist_to_cw, dist_to_pw
                         else:
                             return "中间区域", dist_to_cw, dist_to_pw
                     
@@ -1453,20 +1473,23 @@ def main():
                         生成交易信号 - 基于价格区域 + 做市商盈利逻辑
                         
                         【核心原理】
-                        1. 价格区域判断：
-                           - 突破CW / 跌破PW → 加速信号
-                           - Pin Zone（两边≤5%）→ 区间震荡
-                           - 近CW/PW（≤3%）→ 结合期权结构判断
+                        1. 价格区域判断（7个细分区域）：
+                           - 已突破CW / 已跌破PW → 加速信号
+                           - 临界CW / 临界PW (<1%) → 关键决策区
+                           - 观察区CW / 观察区PW (1-5%) → 预警区
                            - 中间区域（>5%）→ 看期权结构判断方向
                         
-                        2. 期权结构：
-                           - Put主导 = MM处于负Delta，希望涨（杀Put）
-                           - Call主导 = MM处于正Delta，希望跌（杀Call）
+                        2. 期权结构与MM行为：
+                           - 正Gamma (Call主导): 墙是「盾」→ CW阻力, PW支撑 → 均值回归
+                           - 负Gamma (Put主导): 墙是「弹簧」→ CW突破加速, PW跌破加速 → 趋势跟随
                         
                         3. 特殊信号：
                            - 负Gamma螺旋：Put主导+跌破PW → MM被迫追涨杀跌
                            - 弹簧效应：GR极高+VR极低 → Put动能衰竭，超跌反弹潜力
+                           - 周五Pinning：NEG>35%时MM拼命护墙
                         """
+                        import datetime
+                        
                         # 判断Squeeze条件
                         has_squeeze_potential = (options_impact >= 20 and 
                                                 next_gamma is not None and not pd.isna(next_gamma) and next_gamma >= 0.25)
@@ -1489,98 +1512,128 @@ def main():
                         # NEG信息
                         neg_str = f"NEG={next_gamma*100:.0f}%" if (next_gamma is not None and not pd.isna(next_gamma)) else "NEG=N/A"
                         
+                        # ===== 周五Pinning检测 =====
+                        is_friday = datetime.datetime.now().weekday() == 4
+                        is_high_neg = next_gamma is not None and not pd.isna(next_gamma) and next_gamma > 0.35
+                        pinning_warning = ""
+                        if is_friday and is_high_neg:
+                            pinning_warning = " | ⚠️周五+高NEG→Pinning效应，不博突破/破位"
+                        
                         # ===== 价格区域判断 =====
                         
                         # 1. 已突破CW（dist_cw < 0）
-                        if dist_cw < 0:
-                            # Call主导+突破CW = 正Gamma轧空，更强
+                        if position == "已突破CW" or dist_cw < 0:
                             if is_call_side:
-                                return (f"🔥⚡ 正Gamma轧空 {confidence}", 
-                                       f"Call主导+突破CW，MM被迫疯狂买股对冲，暴涨风险！", 
-                                       "bullish")
+                                # 正Gamma+已突破CW = 谨慎追多，需CW上移确认
+                                return (f"🟡 谨慎追多 {confidence}", 
+                                       f"正Gamma仍在压制→需CW向上位移确认→否则可能假突破回落{pinning_warning}", 
+                                       "bullish_cautious")
+                            elif is_put_side:
+                                # 负Gamma+已突破CW = 强势做多
+                                return (f"🚀 强势做多 {confidence}", 
+                                       f"负Gamma+已突破CW→Gamma换挡进入真空区→MM被迫大量买入{pinning_warning}", 
+                                       "strong_bullish")
                             else:
-                                return (f"🔥 突破CW加速 {confidence}", 
-                                       f"价格已突破Call Wall，MM被迫买股对冲，加速上涨", 
-                                       "bullish")
+                                return (f"🟢 偏多观察 {confidence}", 
+                                       f"已突破阻力，但结构中性，轻仓跟随{pinning_warning}", 
+                                       "bullish_watch")
                         
                         # 2. 已跌破PW（dist_pw < 0）- 区分负Gamma螺旋
-                        if dist_pw < 0:
-                            if is_put_side:
-                                # Put主导+跌破PW = 负Gamma螺旋，最危险
-                                return (f"💥⚠️ 负Gamma螺旋 {confidence}", 
-                                       f"{structure}+跌破PW，MM从'希望涨'变'绝望抛'，跌幅可能失控！", 
+                        if position == "已跌破PW" or dist_pw < 0:
+                            if is_call_side:
+                                # 正Gamma+已跌破PW = 谨慎抄底，可能假跌破
+                                return (f"🟡 谨慎抄底 {confidence}", 
+                                       f"正Gamma仍在支撑→可能是假跌破→小仓试多严格止损{pinning_warning}", 
+                                       "bullish_cautious")
+                            elif is_put_side:
+                                # 负Gamma+已跌破PW = 强势做空（负Gamma螺旋）
+                                return (f"💀 强势做空 {confidence}", 
+                                       f"负Gamma+已跌破PW→Gamma坍塌进入杀跌螺旋→MM从支撑变砸盘{pinning_warning}", 
+                                       "strong_bearish")
+                            else:
+                                return (f"🔴 偏空观察 {confidence}", 
+                                       f"已跌破支撑，但结构中性，轻仓跟随{pinning_warning}", 
+                                       "bearish_watch")
+                        
+                        # 3. 临界CW区域（<1%）
+                        if position == "临界CW" or (dist_cw >= 0 and dist_cw < 1):
+                            if is_call_side:
+                                # 正Gamma+临界CW = 阻力减仓（CW是盾）
+                                return (f"🔴 阻力减仓 {confidence}", 
+                                       f"正Gamma环境→CW是盾→MM在此卖压最大→高位减仓等回踩{pinning_warning}", 
+                                       "bearish")
+                            elif is_put_side:
+                                # 负Gamma+临界CW = 突破做多（CW是弹簧）
+                                return (f"🟢 突破做多 {confidence}", 
+                                       f"负Gamma环境→CW是弹簧→突破后MM被迫追涨买入→Squeeze向上{pinning_warning}", 
+                                       "bullish")
+                            else:
+                                return (f"⚪ CW观望 {confidence}", 
+                                       f"临界阻力位，结构中性，等突破确认或回落{pinning_warning}", 
+                                       "neutral")
+                        
+                        # 4. 临界PW区域（<1%）
+                        if position == "临界PW" or (dist_pw >= 0 and dist_pw < 1):
+                            if is_call_side:
+                                # 正Gamma+临界PW = 支撑做多（PW是盾）
+                                return (f"🟢 支撑做多 {confidence}", 
+                                       f"正Gamma环境→PW是盾→MM在此买盘支撑→低位做多{pinning_warning}", 
+                                       "bullish")
+                            elif is_put_side:
+                                # 负Gamma+临界PW = 破位做空（PW是薄冰）
+                                return (f"🔴 破位做空 {confidence}", 
+                                       f"负Gamma环境→PW是薄冰→跌破后MM被迫追跌卖出→Squeeze向下{pinning_warning}", 
                                        "bearish")
                             else:
-                                return (f"💥 跌破PW加速 {confidence}", 
-                                       f"价格已跌破Put Wall，MM被迫卖股对冲，加速下跌", 
-                                       "bearish")
+                                return (f"⚪ PW观望 {confidence}", 
+                                       f"临界支撑位，结构中性，等破位确认或反弹{pinning_warning}", 
+                                       "neutral")
                         
-                        # 3. Pin Zone钉价区（两边都在5%以内）
-                        if dist_cw <= 5 and dist_pw <= 5:
-                            pin_note = ""
-                            if has_squeeze_potential:
-                                pin_note = f" | ⚠️{neg_str}高，到期可能打破区间"
-                            return (f"📊 Pin Zone钉价区 {confidence}", 
-                                   f"CW={dist_cw:.1f}%/PW={dist_pw:.1f}%，区间震荡，高抛低吸{pin_note}", 
-                                   "neutral")
-                        
-                        # 4. 近CW区域（≤5%）- 结合期权结构判断
-                        if dist_cw <= 5:
-                            if dist_cw <= 3:
-                                # 阻力区（≤3%）
-                                if is_put_side and has_squeeze_potential:
-                                    # Put主导+高OI/NEG = MM有动机推涨，可能突破
-                                    return (f"🟢 CW突破潜力 {confidence}", 
-                                           f"{structure}+距CW仅{dist_cw:.1f}%+{neg_str}，MM有动机推涨突破", 
-                                           "bullish")
-                                elif is_put_side:
-                                    return (f"⏳ CW观察 {confidence}", 
-                                           f"{structure}+距CW {dist_cw:.1f}%，关注能否突破", 
-                                           "neutral")
-                                else:
-                                    return (f"🔴 CW阻力区 {confidence}", 
-                                           f"距CW仅{dist_cw:.1f}%，{structure}，MM会压价，谨慎做多", 
-                                           "bearish_watch")
-                            else:
-                                # 预警区（3-5%）
-                                if is_put_side:
-                                    return (f"⏳ 接近CW {confidence}", 
-                                           f"{structure}+距CW {dist_cw:.1f}%，接近阻力，关注突破", 
-                                           "neutral")
-                                else:
-                                    return (f"⚠️ 接近CW阻力 {confidence}", 
-                                           f"距CW {dist_cw:.1f}%，{structure}，接近阻力区", 
-                                           "neutral")
-                        
-                        # 5. 近PW区域（≤5%）- 结合期权结构判断
-                        if dist_pw <= 5:
-                            if dist_pw <= 3:
-                                # 支撑区（≤3%）
-                                if is_call_side and has_squeeze_potential:
-                                    # Call主导+高OI/NEG = MM有动机压价，可能跌破
-                                    return (f"🔴 PW破位风险 {confidence}", 
-                                           f"{structure}+距PW仅{dist_pw:.1f}%+{neg_str}，MM有动机压价破位", 
-                                           "bearish")
-                                elif is_call_side:
-                                    return (f"⏳ PW观察 {confidence}", 
-                                           f"{structure}+距PW {dist_pw:.1f}%，关注能否守住", 
-                                           "neutral")
-                                else:
-                                    return (f"🟢 PW支撑区 {confidence}", 
-                                           f"距PW仅{dist_pw:.1f}%，{structure}，MM会托价，可博反弹", 
+                        # 5. 观察区CW（1-5%）
+                        if position == "观察区CW" or (dist_cw >= 1 and dist_cw <= 5):
+                            if is_call_side:
+                                # 正Gamma+接近CW = 接近阻力
+                                return (f"🟡 接近阻力 {confidence}", 
+                                       f"正Gamma环境→接近CW→准备减仓，不追高{pinning_warning}", 
+                                       "bearish_watch")
+                            elif is_put_side:
+                                # 负Gamma+接近CW = 突破潜力
+                                if has_squeeze_potential:
+                                    return (f"🟢 突破潜力 {confidence}", 
+                                           f"负Gamma环境+{neg_str}→接近CW→突破后有Squeeze潜力{pinning_warning}", 
                                            "bullish_watch")
-                            else:
-                                # 预警区（3-5%）
-                                if is_call_side:
-                                    return (f"⏳ 接近PW {confidence}", 
-                                           f"{structure}+距PW {dist_pw:.1f}%，接近支撑，关注破位", 
-                                           "neutral")
                                 else:
-                                    return (f"⚠️ 接近PW支撑 {confidence}", 
-                                           f"距PW {dist_pw:.1f}%，{structure}，接近支撑区", 
+                                    return (f"⏳ 接近CW观察 {confidence}", 
+                                           f"负Gamma环境→接近CW→关注能否突破{pinning_warning}", 
                                            "neutral")
+                            else:
+                                return (f"⚪ 接近CW观察 {confidence}", 
+                                       f"接近阻力，结构中性，观望{pinning_warning}", 
+                                       "neutral")
                         
-                        # ===== 中间区域（dist_pw > 5% AND dist_cw > 5%）：看期权结构 =====
+                        # 6. 观察区PW（1-5%）
+                        if position == "观察区PW" or (dist_pw >= 1 and dist_pw <= 5):
+                            if is_call_side:
+                                # 正Gamma+接近PW = 接近支撑
+                                return (f"🟢 接近支撑 {confidence}", 
+                                       f"正Gamma环境→接近PW→准备做多，等触及支撑{pinning_warning}", 
+                                       "bullish_watch")
+                            elif is_put_side:
+                                # 负Gamma+接近PW = 破位风险
+                                if has_squeeze_potential:
+                                    return (f"🟡 破位风险 {confidence}", 
+                                           f"负Gamma环境+{neg_str}→接近PW→跌破后有Squeeze向下风险{pinning_warning}", 
+                                           "bearish_watch")
+                                else:
+                                    return (f"⏳ 接近PW观察 {confidence}", 
+                                           f"负Gamma环境→接近PW→关注能否守住{pinning_warning}", 
+                                           "neutral")
+                            else:
+                                return (f"⚪ 接近PW观察 {confidence}", 
+                                       f"接近支撑，结构中性，观望{pinning_warning}", 
+                                       "neutral")
+                        
+                        # ===== 中间区域（dist_pw > 5% AND dist_cw > 5%）=====
                         
                         # 【弹簧效应检测】GR极高 + VR极低 = Put动能衰竭，超跌反弹潜力
                         if gr is not None and vr is not None:
@@ -1589,48 +1642,31 @@ def main():
                                        f"GR={gr:.1f}极高+VR={vr:.2f}极低，Put动能衰竭，存在超跌反弹潜力！", 
                                        "bullish_watch")
                         
-                        # Put侧（主导/偏多/轻微）：MM希望价格涨（杀Put）
-                        if is_put_side:
+                        # 根据Gamma环境判断策略
+                        if is_call_side:
+                            # 正Gamma+中间区域 = 均值回归
+                            return (f"⚖️ 均值回归 {confidence}", 
+                                   f"正Gamma+中间区域→价格向Key Gamma Strike靠拢→高抛低吸", 
+                                   "mean_reversion")
+                        elif is_put_side:
+                            # 负Gamma+中间区域 = 趋势跟随
                             if has_squeeze_potential:
-                                # 根据Put强度给不同信号
                                 if is_strong_put:
-                                    return (f"🟢 Squeeze Up潜力 ⭐⭐⭐", 
-                                           f"{structure}+OI={options_impact:.0f}%+{neg_str}，MM有动机推涨杀Put", 
-                                           "bullish")
-                                elif is_medium_put:
-                                    return (f"🟢 Squeeze Up潜力 ⭐⭐", 
-                                           f"{structure}+OI={options_impact:.0f}%+{neg_str}，MM有动机推涨杀Put", 
-                                           "bullish")
-                                else:  # Put轻微
-                                    return (f"🟢 偏多观察 ⭐", 
-                                           f"{structure}(GR>1)+OI={options_impact:.0f}%，轻微偏多，关注", 
-                                           "bullish_watch")
+                                    return (f"⚡ 趋势跟随 ⭐⭐⭐", 
+                                           f"{structure}+OI={options_impact:.0f}%+{neg_str}→负Gamma趋势行情→顺势交易", 
+                                           "trend_follow")
+                                else:
+                                    return (f"⚡ 趋势跟随 {confidence}", 
+                                           f"{structure}+{neg_str}→负Gamma趋势行情→顺势交易", 
+                                           "trend_follow")
                             else:
-                                if is_strong_put or is_medium_put:
-                                    return (f"🟢 偏多蓄势 {confidence}", 
-                                           f"{structure}，MM倾向推涨，但Squeeze条件不完整", 
-                                           "bullish_watch")
-                                else:  # Put轻微
-                                    return (f"⏳ 轻微偏多 {confidence}", 
-                                           f"{structure}(GR>1)，轻微偏多但条件不足", 
-                                           "neutral")
-                        
-                        # Call主导/偏多：MM希望价格跌（杀Call）
-                        elif is_call_side:
-                            if has_squeeze_potential:
-                                strength = "⭐⭐⭐" if is_strong_call else "⭐⭐"
-                                return (f"🔴 Squeeze Down风险 {strength}", 
-                                       f"{structure}+OI={options_impact:.0f}%+{neg_str}，MM有动机压价杀Call", 
-                                       "bearish")
-                            else:
-                                return (f"🔴 偏空蓄势 {confidence}", 
-                                       f"{structure}，MM倾向压价，但Squeeze条件不完整", 
-                                       "bearish_watch")
-                        
-                        # 中性结构
+                                return (f"🟢 偏多蓄势 {confidence}", 
+                                       f"{structure}→MM倾向推涨，但Squeeze条件不完整", 
+                                       "bullish_watch")
                         else:
+                            # 中性结构+中间区域
                             return (f"⚪ 中性观望 {confidence}", 
-                                   f"期权结构中性，等待方向明确", 
+                                   f"期权结构中性+中间区域→等待方向明确", 
                                    "neutral")
                         
                         return ("❓ 未知", "数据异常", "unknown")
