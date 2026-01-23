@@ -16,6 +16,14 @@ import os
 import warnings
 warnings.filterwarnings('ignore')
 
+# Google Sheets集成
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+    GSHEETS_AVAILABLE = True
+except ImportError:
+    GSHEETS_AVAILABLE = False
+
 # ============================================================
 # 页面配置
 # ============================================================
@@ -30,6 +38,11 @@ st.set_page_config(
 # ============================================================
 TRACKING_FILE = "./squeeze_tracking.json"
 SQUEEZE_THRESHOLD = 5.0  # 5%涨幅算squeeze确认
+
+# Google Sheets配置
+GSHEETS_CREDENTIALS_FILE = "./google_credentials.json"  # 你的API凭证文件
+GSHEETS_SPREADSHEET_NAME = "SpotGamma_Tracking"  # Google Sheets文档名称
+GSHEETS_WORKSHEET_NAME = "tracking_data"  # 工作表名称
 
 # ============================================================
 # 常量定义
@@ -155,20 +168,197 @@ def get_stock_pool(pool_name: str) -> list:
 # Squeeze追踪模块
 # ============================================================
 
-def load_tracking_data():
-    """加载追踪数据"""
+# ===== Google Sheets 集成函数 =====
+
+def get_gsheets_client():
+    """获取Google Sheets客户端"""
+    if not GSHEETS_AVAILABLE:
+        return None
+    
+    try:
+        # 尝试从Streamlit secrets读取凭证
+        if hasattr(st, 'secrets') and 'gcp_service_account' in st.secrets:
+            creds = Credentials.from_service_account_info(
+                st.secrets['gcp_service_account'],
+                scopes=[
+                    'https://www.googleapis.com/auth/spreadsheets',
+                    'https://www.googleapis.com/auth/drive'
+                ]
+            )
+        # 尝试从本地文件读取凭证
+        elif os.path.exists(GSHEETS_CREDENTIALS_FILE):
+            creds = Credentials.from_service_account_file(
+                GSHEETS_CREDENTIALS_FILE,
+                scopes=[
+                    'https://www.googleapis.com/auth/spreadsheets',
+                    'https://www.googleapis.com/auth/drive'
+                ]
+            )
+        else:
+            return None
+        
+        return gspread.authorize(creds)
+    except Exception as e:
+        st.warning(f"Google Sheets连接失败: {e}")
+        return None
+
+def load_tracking_from_gsheets():
+    """从Google Sheets加载追踪数据"""
+    client = get_gsheets_client()
+    if not client:
+        return None
+    
+    try:
+        # 尝试打开文档
+        try:
+            spreadsheet = client.open(GSHEETS_SPREADSHEET_NAME)
+        except gspread.exceptions.SpreadsheetNotFound:
+            st.warning(f"⚠️ 找不到Google Sheets文档 '{GSHEETS_SPREADSHEET_NAME}'。请先创建此文档并共享给Service Account。")
+            return None
+        
+        # 尝试获取工作表，如果不存在则创建
+        try:
+            worksheet = spreadsheet.worksheet(GSHEETS_WORKSHEET_NAME)
+        except gspread.exceptions.WorksheetNotFound:
+            worksheet = spreadsheet.add_worksheet(title=GSHEETS_WORKSHEET_NAME, rows=1000, cols=30)
+            # 创建表头
+            headers = ['symbol', 'data_json']
+            worksheet.append_row(headers)
+            return {}
+        
+        # 读取所有数据
+        all_values = worksheet.get_all_values()
+        
+        # 如果只有表头或空表
+        if len(all_values) <= 1:
+            return {}
+        
+        # 解析数据（跳过表头）
+        tracking_data = {}
+        headers = all_values[0]
+        
+        # 找到symbol和data_json列的索引
+        try:
+            symbol_idx = headers.index('symbol')
+            data_idx = headers.index('data_json')
+        except ValueError:
+            # 表头不正确，重新初始化
+            worksheet.clear()
+            worksheet.append_row(['symbol', 'data_json'])
+            return {}
+        
+        for row in all_values[1:]:
+            if len(row) > max(symbol_idx, data_idx):
+                symbol = row[symbol_idx]
+                data_json = row[data_idx]
+                if symbol and data_json:
+                    try:
+                        tracking_data[symbol] = json.loads(data_json)
+                    except json.JSONDecodeError:
+                        pass
+        
+        return tracking_data
+        
+    except gspread.exceptions.APIError as e:
+        st.warning(f"Google Sheets API错误: {e}")
+        return None
+    except Exception as e:
+        st.warning(f"从Google Sheets加载数据失败: {type(e).__name__}: {e}")
+        return None
+
+def save_tracking_to_gsheets(tracking_data):
+    """保存追踪数据到Google Sheets"""
+    client = get_gsheets_client()
+    if not client:
+        return False
+    
+    try:
+        spreadsheet = client.open(GSHEETS_SPREADSHEET_NAME)
+        
+        # 尝试获取工作表，如果不存在则创建
+        try:
+            worksheet = spreadsheet.worksheet(GSHEETS_WORKSHEET_NAME)
+        except gspread.exceptions.WorksheetNotFound:
+            worksheet = spreadsheet.add_worksheet(title=GSHEETS_WORKSHEET_NAME, rows=1000, cols=30)
+        
+        # 清空现有数据（保留表头）
+        worksheet.clear()
+        
+        # 写入表头
+        headers = ['symbol', 'data_json']
+        worksheet.append_row(headers)
+        
+        # 写入数据
+        rows = []
+        for symbol, data in tracking_data.items():
+            data_json = json.dumps(data, ensure_ascii=False, default=str)
+            rows.append([symbol, data_json])
+        
+        if rows:
+            worksheet.append_rows(rows)
+        
+        return True
+    except Exception as e:
+        st.warning(f"保存到Google Sheets失败: {e}")
+        return False
+
+def sync_tracking_data():
+    """同步追踪数据（Google Sheets优先，本地JSON作为备份）"""
+    # 1. 尝试从Google Sheets加载
+    gsheets_data = load_tracking_from_gsheets()
+    
+    # 2. 加载本地JSON
+    local_data = {}
     if os.path.exists(TRACKING_FILE):
         try:
             with open(TRACKING_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                local_data = json.load(f)
         except:
-            return {}
-    return {}
+            pass
+    
+    # 3. 合并数据（Google Sheets优先，但保留本地新增的记录）
+    if gsheets_data is not None:
+        # Google Sheets可用，以它为主
+        merged_data = gsheets_data.copy()
+        
+        # 检查本地是否有新增记录（Google Sheets中没有的）
+        for symbol, record in local_data.items():
+            if symbol not in merged_data:
+                merged_data[symbol] = record
+        
+        return merged_data, True  # 返回数据和是否连接成功
+    else:
+        # Google Sheets不可用，使用本地数据
+        return local_data, False
+
+# ===== 原有的本地存储函数（作为备份）=====
+
+def load_tracking_data():
+    """加载追踪数据（优先从Google Sheets，失败则从本地）"""
+    # 尝试同步
+    data, gsheets_connected = sync_tracking_data()
+    
+    # 存储连接状态到session_state
+    if 'gsheets_connected' not in st.session_state:
+        st.session_state.gsheets_connected = gsheets_connected
+    else:
+        st.session_state.gsheets_connected = gsheets_connected
+    
+    return data
 
 def save_tracking_data(data):
-    """保存追踪数据"""
-    with open(TRACKING_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=2, ensure_ascii=False, default=str)
+    """保存追踪数据（同时保存到Google Sheets和本地JSON）"""
+    # 1. 保存到本地JSON（作为备份）
+    try:
+        with open(TRACKING_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False, default=str)
+    except Exception as e:
+        st.warning(f"本地保存失败: {e}")
+    
+    # 2. 保存到Google Sheets
+    gsheets_success = save_tracking_to_gsheets(data)
+    
+    return gsheets_success
 
 def get_current_price(symbol):
     """获取当前价格"""
@@ -348,10 +538,22 @@ def calculate_signal_accuracy_stats(tracking_data):
         signal_type_text = record.get('signal_type', '')
         
         # 如果没有signal_direction字段（旧记录），从signal_type文本推断
+        # 【更新】添加新的信号关键词
         if not direction or direction == 'neutral':
-            if any(x in signal_type_text for x in ['做多', '反弹', '偏多', 'bullish']):
+            # 做多信号关键词
+            bullish_keywords = [
+                '做多', '反弹', '偏多', 'bullish', 
+                'Squeeze Up', '突破CW', 'PW支撑区', '弹簧蓄势', '正Gamma轧空'
+            ]
+            # 做空信号关键词
+            bearish_keywords = [
+                '做空', '压力', '偏空', '破位', 'bearish',
+                'Squeeze Down', '跌破PW', 'CW阻力区', '负Gamma螺旋'
+            ]
+            
+            if any(x in signal_type_text for x in bullish_keywords):
                 direction = 'bullish'
-            elif any(x in signal_type_text for x in ['做空', '压力', '偏空', '破位', 'bearish']):
+            elif any(x in signal_type_text for x in bearish_keywords):
                 direction = 'bearish'
             else:
                 direction = 'neutral'
@@ -1144,18 +1346,52 @@ def main():
                     
                     def get_option_structure(row):
                         """
-                        判断期权结构
-                        - Delta Ratio = Put Delta ÷ Call Delta（方向性敞口）
-                        - Gamma Ratio = Put Gamma ÷ Call Gamma（加速效应）
+                        判断期权结构 - 基于回测数据优化
+                        
+                        【关键发现】
+                        - Gamma Ratio > 1: 100%命中Squeeze Up
+                        - Volume Ratio < 1: 100%命中Squeeze Up
+                        - Delta Ratio相对分散，作为辅助
+                        
+                        【指标含义】
+                        - Delta Ratio = Put Delta ÷ Call Delta（负值，越负=Put Delta越大）
+                        - Gamma Ratio = Put Gamma ÷ Call Gamma（>1=Put Gamma主导）
+                        - Volume Ratio = ATM Put Vol ÷ ATM Call Vol（<1=Call交易更活跃）
                         """
                         dr = row['Delta Ratio']
                         gr = row['Gamma Ratio']
+                        vr = row.get('Volume Ratio', None)
+                        
                         if pd.isna(dr) or pd.isna(gr):
                             return "数据缺失", "unknown"
-                        if dr > -1 and gr < 1:
-                            return "Call主导", "call_dominant"
-                        elif dr < -3 and gr > 2:
+                        
+                        # Volume Ratio处理
+                        if vr is None or pd.isna(vr):
+                            vr = 1.0  # 默认中性
+                        
+                        # ===== 新的判断逻辑（基于回测数据）=====
+                        
+                        # Put主导（强）: GR > 1.5 AND DR < -2
+                        if gr > 1.5 and dr < -2:
                             return "Put主导", "put_dominant"
+                        
+                        # Put偏多: GR > 1.3 AND (DR < -1 OR VR < 0.5)
+                        elif gr > 1.3 and (dr < -1 or vr < 0.5):
+                            return "Put偏多", "put_leaning"
+                        
+                        # Put轻微: GR > 1（关键阈值，100%命中）
+                        elif gr > 1:
+                            return "Put轻微", "put_slight"
+                        
+                        # Call主导（强）: GR < 0.8 AND DR > -0.5
+                        elif gr < 0.8 and dr > -0.5:
+                            return "Call主导", "call_dominant"
+                        
+                        # Call偏多: GR < 1 AND DR > -1
+                        elif gr < 1 and dr > -1:
+                            return "Call偏多", "call_leaning"
+                        
+                        # 中性
                         else:
                             return "中性", "neutral"
                     
@@ -1177,36 +1413,19 @@ def main():
                         else:
                             return "趋势/高波动", "trending"
                     
-                    def get_position_zone(row, threshold_observe=5, threshold_critical=1):
-                        """
-                        判断价格位置（相对于Put Wall和Call Wall）
-                        
-                        位置细分：
-                        - 已突破CW / 已跌破PW: 价格已经越过墙
-                        - 临界区 (<1%): 准备入场
-                        - 观察区 (1-5%): 进入watchlist
-                        - 中间区域 (>5%): 安全区
-                        """
+                    def get_position_zone(row, threshold):
+                        """判断价格位置（相对于Put Wall和Call Wall）"""
                         price = row['Current Price']
                         cw = row['Call Wall']
                         pw = row['Put Wall']
                         
-                        dist_to_cw = (cw - price) / price * 100  # 正=价格在CW下方，负=已突破CW
-                        dist_to_pw = (price - pw) / price * 100  # 正=价格在PW上方，负=已跌破PW
+                        dist_to_cw = (cw - price) / price * 100
+                        dist_to_pw = (price - pw) / price * 100
                         
-                        # 判断位置
-                        if dist_to_cw < 0:  # 价格 > CW，已突破
-                            return "已突破CW", dist_to_cw, dist_to_pw
-                        elif dist_to_pw < 0:  # 价格 < PW，已跌破
-                            return "已跌破PW", dist_to_cw, dist_to_pw
-                        elif dist_to_cw < threshold_critical:  # 距离CW < 1%
-                            return "临界CW", dist_to_cw, dist_to_pw
-                        elif dist_to_pw < threshold_critical:  # 距离PW < 1%
-                            return "临界PW", dist_to_cw, dist_to_pw
-                        elif dist_to_cw < threshold_observe:  # 距离CW 1-5%
-                            return "观察区CW", dist_to_cw, dist_to_pw
-                        elif dist_to_pw < threshold_observe:  # 距离PW 1-5%
-                            return "观察区PW", dist_to_cw, dist_to_pw
+                        if dist_to_cw < threshold:
+                            return "近Call Wall", dist_to_cw, dist_to_pw
+                        elif dist_to_pw < threshold:
+                            return "近Put Wall", dist_to_cw, dist_to_pw
                         else:
                             return "中间区域", dist_to_cw, dist_to_pw
                     
@@ -1229,14 +1448,30 @@ def main():
                         else:
                             return "无磁吸", dist_pct
                     
-                    def get_trade_signal(position, structure, vol_regime, options_impact, high_oi_thresh, next_exp_gamma=None):
+                    def get_trade_signal(position, structure, vol_regime, options_impact, high_oi_thresh, dist_pw, dist_cw, next_gamma, gr=None, vr=None):
                         """
-                        生成交易信号 - 位置×结构×波动环境
+                        生成交易信号 - 基于价格区域 + 做市商盈利逻辑
                         
-                        核心逻辑修正：
-                        - 正Gamma (Call主导): CW是盾(阻力), PW是盾(支撑), MM低买高卖, 波动收敛
-                        - 负Gamma (Put主导): CW是弹簧(突破加速), PW是薄冰(跌破加速), MM追涨杀跌, 波动放大
+                        【核心原理】
+                        1. 价格区域判断：
+                           - 突破CW / 跌破PW → 加速信号
+                           - Pin Zone（两边≤5%）→ 区间震荡
+                           - 近CW/PW（≤3%）→ 结合期权结构判断
+                           - 中间区域（>5%）→ 看期权结构判断方向
+                        
+                        2. 期权结构：
+                           - Put主导 = MM处于负Delta，希望涨（杀Put）
+                           - Call主导 = MM处于正Delta，希望跌（杀Call）
+                        
+                        3. 特殊信号：
+                           - 负Gamma螺旋：Put主导+跌破PW → MM被迫追涨杀跌
+                           - 弹簧效应：GR极高+VR极低 → Put动能衰竭，超跌反弹潜力
                         """
+                        # 判断Squeeze条件
+                        has_squeeze_potential = (options_impact >= 20 and 
+                                                next_gamma is not None and not pd.isna(next_gamma) and next_gamma >= 0.25)
+                        
+                        # 置信度
                         if options_impact > high_oi_thresh:
                             confidence = "⭐⭐⭐"
                         elif options_impact > high_oi_thresh * 0.6:
@@ -1244,157 +1479,161 @@ def main():
                         else:
                             confidence = "⭐"
                         
-                        # 检查是否周五到期日Pinning
-                        is_high_neg = next_exp_gamma is not None and next_exp_gamma > 0.35
+                        # 归类期权结构（新增Put轻微）
+                        is_put_side = structure in ["Put主导", "Put偏多", "Put轻微"]
+                        is_call_side = structure in ["Call主导", "Call偏多"]
+                        is_strong_put = structure == "Put主导"
+                        is_medium_put = structure == "Put偏多"
+                        is_strong_call = structure == "Call主导"
                         
-                        # ===== 修正后的信号矩阵 =====
-                        # 核心区分：正Gamma时墙是「盾」，负Gamma时墙是「弹簧/薄冰」
+                        # NEG信息
+                        neg_str = f"NEG={next_gamma*100:.0f}%" if (next_gamma is not None and not pd.isna(next_gamma)) else "NEG=N/A"
                         
-                        signal_matrix = {
-                            # ===== 临界CW区域 (距离<1%) =====
-                            ("临界CW", "Call主导"): (
-                                f"🔴 阻力减仓 {confidence}", 
-                                "正Gamma环境→CW是盾→MM在此卖压最大→高位减仓等回踩", 
-                                "bearish"
-                            ),
-                            ("临界CW", "Put主导"): (
-                                f"🟢 突破做多 {confidence}", 
-                                "负Gamma环境→CW是弹簧→突破后MM被迫追涨买入→Squeeze向上", 
-                                "bullish"
-                            ),
-                            ("临界CW", "中性"): (
-                                "⚪ CW观望", 
-                                "临界阻力位，结构中性，等突破确认或回落", 
-                                "neutral"
-                            ),
-                            
-                            # ===== 观察区CW (距离1-5%) =====
-                            ("观察区CW", "Call主导"): (
-                                f"🟡 接近阻力 {confidence}", 
-                                "正Gamma环境→接近CW→准备减仓，不追高", 
-                                "bearish_watch"
-                            ),
-                            ("观察区CW", "Put主导"): (
-                                f"🟢 突破潜力 {confidence}", 
-                                "负Gamma环境→接近CW→突破后有Squeeze潜力", 
-                                "bullish_watch"
-                            ),
-                            ("观察区CW", "中性"): (
-                                "⚪ 观察", 
-                                "接近阻力，结构中性，观望", 
-                                "neutral"
-                            ),
-                            
-                            # ===== 已突破CW =====
-                            ("已突破CW", "Call主导"): (
-                                f"🟡 谨慎追多 {confidence}", 
-                                "正Gamma仍在压制→需CW向上位移确认→否则可能假突破回落", 
-                                "bullish_cautious"
-                            ),
-                            ("已突破CW", "Put主导"): (
-                                f"🚀 强势做多 {confidence}", 
-                                "负Gamma+已突破CW→Gamma换挡进入真空区→MM被迫大量买入", 
-                                "strong_bullish"
-                            ),
-                            ("已突破CW", "中性"): (
-                                "🟢 偏多观察", 
-                                "已突破阻力，但结构中性，轻仓跟随", 
-                                "bullish_watch"
-                            ),
-                            
-                            # ===== 临界PW区域 (距离<1%) =====
-                            ("临界PW", "Call主导"): (
-                                f"🟢 支撑做多 {confidence}", 
-                                "正Gamma环境→PW是盾→MM在此买盘支撑→低位做多", 
-                                "bullish"
-                            ),
-                            ("临界PW", "Put主导"): (
-                                f"🔴 破位做空 {confidence}", 
-                                "负Gamma环境→PW是薄冰→跌破后MM被迫追跌卖出→Squeeze向下", 
-                                "bearish"
-                            ),
-                            ("临界PW", "中性"): (
-                                "⚪ PW观望", 
-                                "临界支撑位，结构中性，等破位确认或反弹", 
-                                "neutral"
-                            ),
-                            
-                            # ===== 观察区PW (距离1-5%) =====
-                            ("观察区PW", "Call主导"): (
-                                f"🟢 接近支撑 {confidence}", 
-                                "正Gamma环境→接近PW→准备做多，等触及支撑", 
-                                "bullish_watch"
-                            ),
-                            ("观察区PW", "Put主导"): (
-                                f"🟡 破位风险 {confidence}", 
-                                "负Gamma环境→接近PW→跌破后有Squeeze向下风险", 
-                                "bearish_watch"
-                            ),
-                            ("观察区PW", "中性"): (
-                                "⚪ 观察", 
-                                "接近支撑，结构中性，观望", 
-                                "neutral"
-                            ),
-                            
-                            # ===== 已跌破PW =====
-                            ("已跌破PW", "Call主导"): (
-                                f"🟡 谨慎抄底 {confidence}", 
-                                "正Gamma仍在支撑→可能是假跌破→小仓试多严格止损", 
-                                "bullish_cautious"
-                            ),
-                            ("已跌破PW", "Put主导"): (
-                                f"💀 强势做空 {confidence}", 
-                                "负Gamma+已跌破PW→Gamma坍塌进入杀跌螺旋→MM从支撑变砸盘", 
-                                "strong_bearish"
-                            ),
-                            ("已跌破PW", "中性"): (
-                                "🔴 偏空观察", 
-                                "已跌破支撑，但结构中性，轻仓跟随", 
-                                "bearish_watch"
-                            ),
-                            
-                            # ===== 中间区域 =====
-                            ("中间区域", "Call主导"): (
-                                "⚖️ 均值回归", 
-                                "正Gamma+中间区域→价格向Key Gamma Strike靠拢→高抛低吸", 
-                                "mean_reversion"
-                            ),
-                            ("中间区域", "Put主导"): (
-                                "⚡ 趋势跟随", 
-                                "负Gamma+中间区域→波动放大趋势行情→顺势交易", 
-                                "trend_follow"
-                            ),
-                            ("中间区域", "中性"): (
-                                "⚪ 中性观望", 
-                                "结构中性+位置中性→无明确方向→等待信号", 
-                                "neutral"
-                            ),
-                        }
+                        # ===== 价格区域判断 =====
                         
-                        # 兼容旧的位置名称
-                        position_map = {
-                            "近Call Wall": "临界CW",
-                            "近Put Wall": "临界PW",
-                        }
-                        mapped_position = position_map.get(position, position)
+                        # 1. 已突破CW（dist_cw < 0）
+                        if dist_cw < 0:
+                            # Call主导+突破CW = 正Gamma轧空，更强
+                            if is_call_side:
+                                return (f"🔥⚡ 正Gamma轧空 {confidence}", 
+                                       f"Call主导+突破CW，MM被迫疯狂买股对冲，暴涨风险！", 
+                                       "bullish")
+                            else:
+                                return (f"🔥 突破CW加速 {confidence}", 
+                                       f"价格已突破Call Wall，MM被迫买股对冲，加速上涨", 
+                                       "bullish")
                         
-                        base_signal = signal_matrix.get((mapped_position, structure), ("❓ 未知", "数据异常", "unknown"))
+                        # 2. 已跌破PW（dist_pw < 0）- 区分负Gamma螺旋
+                        if dist_pw < 0:
+                            if is_put_side:
+                                # Put主导+跌破PW = 负Gamma螺旋，最危险
+                                return (f"💥⚠️ 负Gamma螺旋 {confidence}", 
+                                       f"{structure}+跌破PW，MM从'希望涨'变'绝望抛'，跌幅可能失控！", 
+                                       "bearish")
+                            else:
+                                return (f"💥 跌破PW加速 {confidence}", 
+                                       f"价格已跌破Put Wall，MM被迫卖股对冲，加速下跌", 
+                                       "bearish")
                         
-                        # 波动环境修正
-                        signal, logic, sig_type = base_signal
-                        if vol_regime == "均值回归" and sig_type in ["bullish", "bearish", "strong_bullish", "strong_bearish"]:
-                            logic += " | ⚠️均值回归环境，突破/破位难度增大"
-                        elif vol_regime == "趋势/高波动" and sig_type in ["bullish", "bearish", "strong_bullish", "strong_bearish"]:
-                            logic += " | ✅趋势环境，顺势信号更可靠"
+                        # 3. Pin Zone钉价区（两边都在5%以内）
+                        if dist_cw <= 5 and dist_pw <= 5:
+                            pin_note = ""
+                            if has_squeeze_potential:
+                                pin_note = f" | ⚠️{neg_str}高，到期可能打破区间"
+                            return (f"📊 Pin Zone钉价区 {confidence}", 
+                                   f"CW={dist_cw:.1f}%/PW={dist_pw:.1f}%，区间震荡，高抛低吸{pin_note}", 
+                                   "neutral")
                         
-                        # 周五Pinning效应修正
-                        if is_high_neg and mapped_position in ["临界CW", "临界PW", "观察区CW", "观察区PW"]:
-                            import datetime
-                            if datetime.datetime.now().weekday() == 4:  # 周五
-                                signal = "⚠️ Pinning " + signal
-                                logic += " | 🎯周五+高NEG→Pinning效应强→不博突破/破位"
+                        # 4. 近CW区域（≤5%）- 结合期权结构判断
+                        if dist_cw <= 5:
+                            if dist_cw <= 3:
+                                # 阻力区（≤3%）
+                                if is_put_side and has_squeeze_potential:
+                                    # Put主导+高OI/NEG = MM有动机推涨，可能突破
+                                    return (f"🟢 CW突破潜力 {confidence}", 
+                                           f"{structure}+距CW仅{dist_cw:.1f}%+{neg_str}，MM有动机推涨突破", 
+                                           "bullish")
+                                elif is_put_side:
+                                    return (f"⏳ CW观察 {confidence}", 
+                                           f"{structure}+距CW {dist_cw:.1f}%，关注能否突破", 
+                                           "neutral")
+                                else:
+                                    return (f"🔴 CW阻力区 {confidence}", 
+                                           f"距CW仅{dist_cw:.1f}%，{structure}，MM会压价，谨慎做多", 
+                                           "bearish_watch")
+                            else:
+                                # 预警区（3-5%）
+                                if is_put_side:
+                                    return (f"⏳ 接近CW {confidence}", 
+                                           f"{structure}+距CW {dist_cw:.1f}%，接近阻力，关注突破", 
+                                           "neutral")
+                                else:
+                                    return (f"⚠️ 接近CW阻力 {confidence}", 
+                                           f"距CW {dist_cw:.1f}%，{structure}，接近阻力区", 
+                                           "neutral")
                         
-                        return signal, logic, sig_type
+                        # 5. 近PW区域（≤5%）- 结合期权结构判断
+                        if dist_pw <= 5:
+                            if dist_pw <= 3:
+                                # 支撑区（≤3%）
+                                if is_call_side and has_squeeze_potential:
+                                    # Call主导+高OI/NEG = MM有动机压价，可能跌破
+                                    return (f"🔴 PW破位风险 {confidence}", 
+                                           f"{structure}+距PW仅{dist_pw:.1f}%+{neg_str}，MM有动机压价破位", 
+                                           "bearish")
+                                elif is_call_side:
+                                    return (f"⏳ PW观察 {confidence}", 
+                                           f"{structure}+距PW {dist_pw:.1f}%，关注能否守住", 
+                                           "neutral")
+                                else:
+                                    return (f"🟢 PW支撑区 {confidence}", 
+                                           f"距PW仅{dist_pw:.1f}%，{structure}，MM会托价，可博反弹", 
+                                           "bullish_watch")
+                            else:
+                                # 预警区（3-5%）
+                                if is_call_side:
+                                    return (f"⏳ 接近PW {confidence}", 
+                                           f"{structure}+距PW {dist_pw:.1f}%，接近支撑，关注破位", 
+                                           "neutral")
+                                else:
+                                    return (f"⚠️ 接近PW支撑 {confidence}", 
+                                           f"距PW {dist_pw:.1f}%，{structure}，接近支撑区", 
+                                           "neutral")
+                        
+                        # ===== 中间区域（dist_pw > 5% AND dist_cw > 5%）：看期权结构 =====
+                        
+                        # 【弹簧效应检测】GR极高 + VR极低 = Put动能衰竭，超跌反弹潜力
+                        if gr is not None and vr is not None:
+                            if gr > 2 and vr < 0.3:
+                                return (f"🔋 弹簧蓄势 {confidence}", 
+                                       f"GR={gr:.1f}极高+VR={vr:.2f}极低，Put动能衰竭，存在超跌反弹潜力！", 
+                                       "bullish_watch")
+                        
+                        # Put侧（主导/偏多/轻微）：MM希望价格涨（杀Put）
+                        if is_put_side:
+                            if has_squeeze_potential:
+                                # 根据Put强度给不同信号
+                                if is_strong_put:
+                                    return (f"🟢 Squeeze Up潜力 ⭐⭐⭐", 
+                                           f"{structure}+OI={options_impact:.0f}%+{neg_str}，MM有动机推涨杀Put", 
+                                           "bullish")
+                                elif is_medium_put:
+                                    return (f"🟢 Squeeze Up潜力 ⭐⭐", 
+                                           f"{structure}+OI={options_impact:.0f}%+{neg_str}，MM有动机推涨杀Put", 
+                                           "bullish")
+                                else:  # Put轻微
+                                    return (f"🟢 偏多观察 ⭐", 
+                                           f"{structure}(GR>1)+OI={options_impact:.0f}%，轻微偏多，关注", 
+                                           "bullish_watch")
+                            else:
+                                if is_strong_put or is_medium_put:
+                                    return (f"🟢 偏多蓄势 {confidence}", 
+                                           f"{structure}，MM倾向推涨，但Squeeze条件不完整", 
+                                           "bullish_watch")
+                                else:  # Put轻微
+                                    return (f"⏳ 轻微偏多 {confidence}", 
+                                           f"{structure}(GR>1)，轻微偏多但条件不足", 
+                                           "neutral")
+                        
+                        # Call主导/偏多：MM希望价格跌（杀Call）
+                        elif is_call_side:
+                            if has_squeeze_potential:
+                                strength = "⭐⭐⭐" if is_strong_call else "⭐⭐"
+                                return (f"🔴 Squeeze Down风险 {strength}", 
+                                       f"{structure}+OI={options_impact:.0f}%+{neg_str}，MM有动机压价杀Call", 
+                                       "bearish")
+                            else:
+                                return (f"🔴 偏空蓄势 {confidence}", 
+                                       f"{structure}，MM倾向压价，但Squeeze条件不完整", 
+                                       "bearish_watch")
+                        
+                        # 中性结构
+                        else:
+                            return (f"⚪ 中性观望 {confidence}", 
+                                   f"期权结构中性，等待方向明确", 
+                                   "neutral")
+                        
+                        return ("❓ 未知", "数据异常", "unknown")
                     
                     def detect_special_signals(row, dist_to_pw, dist_to_cw):
                         """
@@ -1461,13 +1700,26 @@ def main():
                                 if not has_bounce_or_trap:
                                     signals.append(("🟠 Gamma集中警告", f"{next_gamma*100:.0f}%将在下次到期释放（官方警戒线25%）", "gamma_risk_medium"))
                         
-                        # 3. 空头挤压风险（极度偏空+低成交+近支撑但未破）
-                        if dr < -5 and (vr is None or pd.isna(vr) or vr < 0.5) and 0 < dist_to_pw < 10:
-                            signals.append(("⚠️ 空头挤压风险", "极度偏空+低成交+近支撑→空头拥挤，逆势反弹风险", "short_squeeze"))
+                        # 3. Squeeze Up潜力提示（Put主导+远离PW+高OI/NEG）
+                        # 核心逻辑：Put主导=MM Short Put多→MM希望涨→有动机推涨杀Put
+                        is_put_dominant = dr < -3 or gr > 2
+                        has_squeeze_condition = (oi >= 20 and next_gamma is not None and not pd.isna(next_gamma) and next_gamma > 0.25)
                         
-                        # 4. 多头踩踏风险（偏多+放量+近阻力）
-                        if dr > -1 and vr is not None and not pd.isna(vr) and vr > 1.5 and dist_to_cw < 10:
-                            signals.append(("⚠️ 多头回撤风险", "偏多+放量+近阻力→获利盘抛压", "long_liquidation"))
+                        if is_put_dominant and dist_to_pw > 10 and has_squeeze_condition:
+                            if dist_to_cw < 5:
+                                signals.append(("🚀 Squeeze Up临界点", f"Put主导+远离PW+近CW，突破后MM买股对冲加速上涨", "squeeze_up_imminent"))
+                            elif dist_to_cw < 15:
+                                signals.append(("🟢 Squeeze Up潜力", f"Put主导+OI={oi:.0f}%+NEG={next_gamma*100:.0f}%，MM有动机推涨", "squeeze_up_potential"))
+                        
+                        # 4. Squeeze Down风险提示（Call主导+远离CW+高OI/NEG）
+                        # 核心逻辑：Call主导=MM Short Call多→MM希望跌→有动机压价杀Call
+                        is_call_dominant = dr > -1 or gr < 1
+                        
+                        if is_call_dominant and dist_to_cw > 10 and has_squeeze_condition:
+                            if dist_to_pw < 5:
+                                signals.append(("💥 Squeeze Down临界点", f"Call主导+远离CW+近PW，跌破后MM卖股对冲加速下跌", "squeeze_down_imminent"))
+                            elif dist_to_pw < 15:
+                                signals.append(("🔴 Squeeze Down风险", f"Call主导+OI={oi:.0f}%+NEG={next_gamma*100:.0f}%，MM有动机压价", "squeeze_down_risk"))
                         
                         # 5. Delta Ratio与P/C OI一致性验证
                         if pc_oi is not None and not pd.isna(pc_oi):
@@ -1527,8 +1779,8 @@ def main():
                     sg_df['Vol_Regime'] = vol_regime_results.apply(lambda x: x[0])
                     sg_df['Vol_Regime_Type'] = vol_regime_results.apply(lambda x: x[1])
                     
-                    # 价格位置（使用新的细分区域）
-                    position_results = sg_df.apply(lambda row: get_position_zone(row, threshold_observe=near_wall_threshold, threshold_critical=1), axis=1)
+                    # 价格位置
+                    position_results = sg_df.apply(lambda row: get_position_zone(row, near_wall_threshold), axis=1)
                     sg_df['Price_Position'] = position_results.apply(lambda x: x[0])
                     sg_df['Dist_CW_Calc'] = position_results.apply(lambda x: x[1])
                     sg_df['Dist_PW_Calc'] = position_results.apply(lambda x: x[2])
@@ -1538,7 +1790,7 @@ def main():
                     sg_df['Gamma_Magnet'] = magnet_results.apply(lambda x: x[0])
                     sg_df['Dist_to_KGS'] = magnet_results.apply(lambda x: x[1])
                     
-                    # 交易信号（整合波动环境 + NEG到期效应）
+                    # 交易信号（基于做市商盈利逻辑）
                     signal_results = sg_df.apply(
                         lambda row: get_trade_signal(
                             row['Price_Position'], 
@@ -1546,7 +1798,11 @@ def main():
                             row['Vol_Regime'],
                             row['Options Impact'], 
                             high_oi_threshold,
-                            row.get('Next Exp Gamma', None)  # 传入NEG用于Pinning判断
+                            row['Dist_PW_Calc'],  # 距离Put Wall
+                            row['Dist_CW_Calc'],  # 距离Call Wall
+                            row['Next Exp Gamma'] if 'Next Exp Gamma' in row and pd.notna(row['Next Exp Gamma']) else None,
+                            row['Gamma Ratio'] if 'Gamma Ratio' in row and pd.notna(row['Gamma Ratio']) else None,
+                            row['Volume Ratio'] if 'Volume Ratio' in row and pd.notna(row['Volume Ratio']) else None
                         ), axis=1)
                     sg_df['Trade_Signal'] = signal_results.apply(lambda x: x[0])
                     sg_df['Signal_Logic'] = signal_results.apply(lambda x: x[1])
@@ -1563,12 +1819,13 @@ def main():
                     st.subheader("📊 分析概览")
                     
                     # 统计各类信号
-                    col1, col2, col3, col4, col5 = st.columns(5)
+                    col1, col2, col3, col4, col5, col6 = st.columns(6)
                     
                     bullish_count = len(sg_filtered[sg_filtered['Signal_Type'] == 'bullish'])
                     bearish_count = len(sg_filtered[sg_filtered['Signal_Type'] == 'bearish'])
                     watch_bull = len(sg_filtered[sg_filtered['Signal_Type'] == 'bullish_watch'])
                     watch_bear = len(sg_filtered[sg_filtered['Signal_Type'] == 'bearish_watch'])
+                    spring_count = len(sg_filtered[sg_filtered['Trade_Signal'].str.contains('弹簧蓄势', na=False)])
                     
                     # 统计波动环境
                     mean_rev_count = len(sg_filtered[sg_filtered['Vol_Regime_Type'] == 'mean_reversion'])
@@ -1579,10 +1836,12 @@ def main():
                     with col2:
                         st.metric("🔴 高确信做空", bearish_count)
                     with col3:
-                        st.metric("🟢 偏多观察", watch_bull)
+                        st.metric("🔋 弹簧蓄势", spring_count)
                     with col4:
-                        st.metric("🔴 偏空观察", watch_bear)
+                        st.metric("🟢 偏多观察", watch_bull)
                     with col5:
+                        st.metric("🔴 偏空观察", watch_bear)
+                    with col6:
                         st.metric("📈 趋势环境", trending_count, help="价格<Hedge Wall，高波动")
                     
                     st.caption(f"已分析 {len(sg_filtered)} 只标的 (Options Impact ≥ {min_options_impact}%)")
@@ -1604,7 +1863,7 @@ def main():
                     
                     # ===== 🟢 高确信做多信号 =====
                     st.subheader("🟢 高确信做多信号")
-                    st.caption("位置×结构: 临界CW+Call主导=🔴阻力减仓 | 临界CW+Put主导=🟢突破做多 | 临界PW+Call主导=🟢支撑做多")
+                    st.caption("中间区域: Put主导+高OI+高NEG → Squeeze Up | 近PW(≤3%): 支撑区可博反弹 | 突破CW: 加速上涨")
                     
                     bullish_signals = sg_filtered[sg_filtered['Signal_Type'] == 'bullish'].copy()
                     bullish_signals = bullish_signals.sort_values('Options Impact', ascending=False)
@@ -1638,7 +1897,7 @@ def main():
                     
                     # ===== 🔴 高确信做空信号 =====
                     st.subheader("🔴 高确信做空信号")
-                    st.caption("位置×结构: 临界CW+Call主导=🔴阻力 | 临界PW+Put主导=🔴破位做空 | 已突破CW+Put主导=🚀强势做多")
+                    st.caption("中间区域: Call主导+高OI+高NEG → Squeeze Down | 近CW(≤3%): 阻力区谨慎做多 | 跌破PW: 加速下跌")
                     
                     bearish_signals = sg_filtered[sg_filtered['Signal_Type'] == 'bearish'].copy()
                     bearish_signals = bearish_signals.sort_values('Options Impact', ascending=False)
@@ -1668,6 +1927,41 @@ def main():
                                 st.divider()
                     else:
                         st.info("无高确信做空信号")
+                    
+                    # ===== 🔋 弹簧蓄势信号 =====
+                    st.subheader("🔋 弹簧蓄势信号")
+                    st.caption("GR极高(>2) + VR极低(<0.3) = Put动能衰竭，存在超跌反弹潜力！")
+                    
+                    # 筛选弹簧蓄势信号
+                    spring_signals = sg_filtered[sg_filtered['Trade_Signal'].str.contains('弹簧蓄势', na=False)].copy()
+                    spring_signals = spring_signals.sort_values('Options Impact', ascending=False)
+                    
+                    if len(spring_signals) > 0:
+                        for _, row in spring_signals.iterrows():
+                            special_sigs = row['Special_Signals']
+                            special_str = ''
+                            if special_sigs:
+                                special_str = '\n'.join([f"  - {s[0]}: {s[1]}" for s in special_sigs])
+                            
+                            magnet_str = f" | 磁吸: {row['Gamma_Magnet']}" if row['Gamma_Magnet'] else ""
+                            
+                            with st.container():
+                                col1, col2 = st.columns([1, 2])
+                                with col1:
+                                    st.markdown(f"**{row['Symbol']}** ${row['Current Price']:.2f}")
+                                    st.caption(f"{row['Trade_Signal']}")
+                                with col2:
+                                    vr_val = row['Volume Ratio'] if pd.notna(row['Volume Ratio']) else 0
+                                    st.markdown(f"""
+                                    - **位置**: {row['Price_Position']} | **结构**: {row['Option_Structure']} | **环境**: {row['Vol_Regime']}
+                                    - DR: {row['Delta Ratio']:.2f} | **GR: {row['Gamma Ratio']:.2f}** | **VR: {vr_val:.4f}** | OI: {row['Options Impact']:.1f}%{magnet_str}
+                                    - PW: {row['Put Wall']} → 现价 → CW: {row['Call Wall']}
+                                    - 逻辑: {row['Signal_Logic']}
+                                    {f'- **特殊信号**:{chr(10)}{special_str}' if special_str else ''}
+                                    """)
+                                st.divider()
+                    else:
+                        st.info("无弹簧蓄势信号")
                     
                     # ===== 观察名单 =====
                     with st.expander("👀 观察名单（等待接近关键位置）"):
@@ -1882,39 +2176,63 @@ def main():
                     
                     # ===== Squeeze追踪面板 =====
                     st.subheader("📈 Squeeze追踪面板")
-                    st.caption(f"追踪文件: {os.path.abspath(TRACKING_FILE)} | Squeeze标准: ≥{SQUEEZE_THRESHOLD}%涨幅")
                     
-                    # 加载追踪数据
+                    # 加载追踪数据（这会设置gsheets_connected状态）
                     tracking_data = load_tracking_data()
                     today_str = datetime.now().strftime('%Y-%m-%d')
                     
+                    # Google Sheets连接状态显示（在load之后）
+                    gsheets_status = st.session_state.get('gsheets_connected', False)
+                    if gsheets_status:
+                        st.caption(f"☁️ **云端同步已启用** (Google Sheets: {GSHEETS_SPREADSHEET_NAME}) | Squeeze标准: ≥{SQUEEZE_THRESHOLD}%涨幅")
+                    else:
+                        st.caption(f"💾 **本地存储模式** ({os.path.abspath(TRACKING_FILE)}) | Squeeze标准: ≥{SQUEEZE_THRESHOLD}%涨幅")
+                        if GSHEETS_AVAILABLE:
+                            st.info("💡 Google Sheets凭证未配置或连接失败，数据仅保存在本地。重启后数据可能丢失。")
+                    
                     # 识别新标的并添加到追踪
                     new_symbols = []
+                    updated_signals = []
                     for _, row in sg_filtered.iterrows():
                         symbol = row['Symbol']
-                        signal_type = row.get('Trade_Signal', '未知信号')
+                        # 正确获取Trade_Signal
+                        signal_type = row['Trade_Signal'] if 'Trade_Signal' in row.index and pd.notna(row['Trade_Signal']) else '未知信号'
                         
                         if symbol not in tracking_data:
                             # 新标的
                             tracking_data[symbol] = add_new_tracking(symbol, row, signal_type, today_str)
                             new_symbols.append(symbol)
                         else:
-                            # 已存在的标的，检查是否需要更新信号（如果信号变化）
+                            # 已存在的标的，更新信号类型（如果信号变化）
+                            old_signal = tracking_data[symbol].get('signal_type', '')
+                            if signal_type != old_signal and signal_type != '未知信号':
+                                tracking_data[symbol]['signal_type'] = signal_type
+                                updated_signals.append(f"{symbol}: {old_signal[:15]}→{signal_type[:15]}")
                             tracking_data[symbol]['is_new'] = False
                     
                     # 保存更新
-                    if new_symbols:
+                    if new_symbols or updated_signals:
                         save_tracking_data(tracking_data)
-                        st.success(f"🆕 新增追踪: {', '.join(new_symbols)}")
+                        if new_symbols:
+                            st.success(f"🆕 新增追踪: {', '.join(new_symbols)}")
+                        if updated_signals:
+                            st.info(f"🔄 信号更新: {'; '.join(updated_signals)}")
                     
-                    # 刷新价格按钮
-                    col1, col2, col3 = st.columns([1, 1, 2])
+                    # 操作按钮行
+                    col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
                     with col1:
                         refresh_btn = st.button("🔄 刷新价格", type="primary")
                     with col2:
-                        clear_completed = st.button("🗑️ 清除已完成")
+                        if st.button("☁️ 强制同步云端"):
+                            success = save_tracking_to_gsheets(tracking_data)
+                            if success:
+                                st.success("✅ 已同步到Google Sheets")
+                            else:
+                                st.error("❌ 同步失败，请检查凭证配置")
                     with col3:
-                        if st.button("🗑️ 清空所有追踪记录"):
+                        clear_completed = st.button("🗑️ 清除已完成")
+                    with col4:
+                        if st.button("🗑️ 清空所有追踪"):
                             tracking_data = {}
                             save_tracking_data(tracking_data)
                             st.rerun()
@@ -1945,7 +2263,10 @@ def main():
                     # 显示统计
                     stats = calculate_tracking_stats(tracking_data)
                     
-                    stat_col1, stat_col2, stat_col3, stat_col4, stat_col5 = st.columns(5)
+                    # 计算弹簧蓄势数量
+                    spring_tracking_count = sum(1 for r in tracking_data.values() if '弹簧蓄势' in r.get('signal_type', ''))
+                    
+                    stat_col1, stat_col2, stat_col3, stat_col4, stat_col5, stat_col6 = st.columns(6)
                     with stat_col1:
                         st.metric("⏳ 追踪中", stats['tracking'])
                     with stat_col2:
@@ -1953,8 +2274,10 @@ def main():
                     with stat_col3:
                         st.metric("🎯 确认Squeeze", stats['squeeze'])
                     with stat_col4:
-                        st.metric("❌ 失败", stats['failed'])
+                        st.metric("🔋 弹簧蓄势", spring_tracking_count)
                     with stat_col5:
+                        st.metric("❌ 失败", stats['failed'])
+                    with stat_col6:
                         st.metric("📊 胜率", f"{stats['win_rate']:.1f}%")
                     
                     # 显示追踪表格
@@ -2080,10 +2403,25 @@ def main():
                         # 计算信号正确率统计
                         signal_stats = calculate_signal_accuracy_stats(tracking_data)
                         
+                        # 计算弹簧蓄势的统计
+                        spring_stats = {'total': 0, 'correct': 0}
+                        for symbol, record in tracking_data.items():
+                            if '弹簧蓄势' in record.get('signal_type', ''):
+                                spring_stats['total'] += 1
+                                # 计算当前涨跌幅
+                                entry_price = record.get('entry_price', 0)
+                                daily_prices = record.get('daily_prices', {})
+                                if daily_prices and entry_price > 0:
+                                    latest_date = max(daily_prices.keys())
+                                    current_price = daily_prices[latest_date]
+                                    current_return = ((current_price - entry_price) / entry_price) * 100
+                                    if current_return > 0:  # 弹簧蓄势是做多信号，涨了就正确
+                                        spring_stats['correct'] += 1
+                        
                         # 显示统计
                         st.markdown("#### 📊 信号正确率统计")
                         
-                        sig_col1, sig_col2, sig_col3, sig_col4 = st.columns(4)
+                        sig_col1, sig_col2, sig_col3, sig_col4, sig_col5 = st.columns(5)
                         with sig_col1:
                             bullish_total = signal_stats['bullish']['total']
                             bullish_correct = signal_stats['bullish']['correct']
@@ -2101,12 +2439,21 @@ def main():
                                 f"{bearish_correct}/{bearish_total} 正确"
                             )
                         with sig_col3:
+                            spring_total = spring_stats['total']
+                            spring_correct = spring_stats['correct']
+                            spring_accuracy = (spring_correct / spring_total * 100) if spring_total > 0 else 0
+                            st.metric(
+                                f"🔋 弹簧蓄势 ({spring_total}个)", 
+                                f"{spring_accuracy:.1f}%",
+                                f"{spring_correct}/{spring_total} 正确"
+                            )
+                        with sig_col4:
                             st.metric(
                                 "⚪ 中性信号", 
                                 f"{signal_stats['neutral']['total']}个",
                                 "不计入正确率"
                             )
-                        with sig_col4:
+                        with sig_col5:
                             overall_total = signal_stats['overall']['total']
                             overall_correct = signal_stats['overall']['correct']
                             st.metric(
@@ -2123,10 +2470,22 @@ def main():
                             is_new = record.get('is_new', False)
                             
                             # 如果没有signal_direction字段（旧记录），从signal_type文本推断
+                            # 【更新】添加新的信号关键词
                             if not direction or direction == 'neutral':
-                                if any(x in signal_type_text for x in ['做多', '反弹', '偏多', 'bullish']):
+                                # 做多信号关键词
+                                bullish_keywords = [
+                                    '做多', '反弹', '偏多', 'bullish', 
+                                    'Squeeze Up', '突破CW', 'PW支撑区', '弹簧蓄势', '正Gamma轧空'
+                                ]
+                                # 做空信号关键词
+                                bearish_keywords = [
+                                    '做空', '压力', '偏空', '破位', 'bearish',
+                                    'Squeeze Down', '跌破PW', 'CW阻力区', '负Gamma螺旋'
+                                ]
+                                
+                                if any(x in signal_type_text for x in bullish_keywords):
                                     direction = 'bullish'
-                                elif any(x in signal_type_text for x in ['做空', '压力', '偏空', '破位', 'bearish']):
+                                elif any(x in signal_type_text for x in bearish_keywords):
                                     direction = 'bearish'
                                 else:
                                     direction = 'neutral'
@@ -2231,10 +2590,22 @@ def main():
                                 direction = record.get('signal_direction', '')
                                 
                                 # 如果没有signal_direction字段（旧记录），从signal_type文本推断
+                                # 【更新】添加新的信号关键词
                                 if not direction or direction == 'neutral':
-                                    if any(x in sig_type for x in ['做多', '反弹', '偏多', 'bullish']):
+                                    # 做多信号关键词
+                                    bullish_keywords = [
+                                        '做多', '反弹', '偏多', 'bullish', 
+                                        'Squeeze Up', '突破CW', 'PW支撑区', '弹簧蓄势', '正Gamma轧空'
+                                    ]
+                                    # 做空信号关键词
+                                    bearish_keywords = [
+                                        '做空', '压力', '偏空', '破位', 'bearish',
+                                        'Squeeze Down', '跌破PW', 'CW阻力区', '负Gamma螺旋'
+                                    ]
+                                    
+                                    if any(x in sig_type for x in bullish_keywords):
                                         direction = 'bullish'
-                                    elif any(x in sig_type for x in ['做空', '压力', '偏空', '破位', 'bearish']):
+                                    elif any(x in sig_type for x in bearish_keywords):
                                         direction = 'bearish'
                                     else:
                                         direction = 'neutral'
@@ -2344,45 +2715,31 @@ def main():
         
         with st.expander("🎯 交易信号矩阵"):
             st.markdown("""
-            **核心逻辑：墙是「盾」还是「弹簧」取决于Gamma环境**
+            **位置×结构矩阵:**
             
-            | Gamma环境 | Call Wall | Put Wall | MM行为 | 策略 |
-            |-----------|-----------|----------|--------|------|
-            | **正Gamma (Call主导)** | 🛡️盾(阻力) | 🛡️盾(支撑) | 低买高卖 | 均值回归 |
-            | **负Gamma (Put主导)** | 🏹弹簧(突破加速) | 🕳️薄冰(跌破加速) | 追涨杀跌 | 趋势跟随 |
-            
-            ---
-            
-            **修正后的位置×结构信号矩阵:**
-            
-            | 位置 | Call主导 (正Gamma) | Put主导 (负Gamma) |
-            |------|-------------------|-------------------|
-            | **临界CW (<1%)** | 🔴 阻力减仓 | 🟢 突破做多 |
-            | **观察区CW (1-5%)** | 🟡 接近阻力 | 🟢 突破潜力 |
-            | **已突破CW** | 🟡 谨慎追多(等CW上移) | 🚀 强势做多 |
-            | **临界PW (<1%)** | 🟢 支撑做多 | 🔴 破位做空 |
-            | **观察区PW (1-5%)** | 🟢 接近支撑 | 🟡 破位风险 |
-            | **已跌破PW** | 🟡 谨慎抄底 | 💀 强势做空 |
-            | **中间区域** | ⚖️ 均值回归 | ⚡ 趋势跟随 |
+            | 位置 | Call主导 | Put主导 |
+            |------|----------|---------|
+            | 近CW | 🟢突破做多 | 🔴压力做空 |
+            | 近PW | 🟢反弹做多 | 🔴破位做空 |
+            | 中间 | 观察 | 观察 |
             
             ---
             
             **期权结构判断:**
-            - **Call主导(正Gamma)**: DR > -1 且 GR < 1 → MM低买高卖，波动收敛
-            - **Put主导(负Gamma)**: DR < -3 且 GR > 2 → MM追涨杀跌，波动放大
+            - **Call主导**: DR > -1 且 GR < 1
+            - **Put主导**: DR < -3 且 GR > 2
             
             ---
             
-            **MM对冲机制(修正):**
-            - **正Gamma下**: CW是阻力(MM在此卖出)，PW是支撑(MM在此买入)
-            - **负Gamma下**: CW是弹簧(突破后MM追涨)，PW是薄冰(跌破后MM追跌)
+            **MM对冲机制:**
+            - CW是天花板，MM卖Call→突破后被迫买股→squeeze↑
+            - PW是地板，MM卖Put→跌破后被迫卖股→squeeze↓
             
             ---
             
-            **催化剂「通行证」(可覆盖默认信号):**
-            - DPI > 55%: 暗池暴力买入可突破正Gamma下的CW阻力
-            - CW向上位移: 机构认可突破，原CW阻力消失
-            - 周五+NEG>35%: Pinning效应，不博突破/破位
+            **波动环境修正:**
+            - 价格 > Hedge Wall → 均值回归，突破难度大
+            - 价格 < Hedge Wall → 趋势环境，顺势信号更可靠
             """)
         
         with st.expander("⚡ 特殊信号说明"):
