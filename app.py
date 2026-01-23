@@ -2099,12 +2099,24 @@ def main():
                     
                     # ===== 完整分析表 =====
                     with st.expander("📋 查看完整分析表"):
+                        # 添加过滤选项
+                        show_all_stocks = st.checkbox("显示所有股票（忽略Options Impact过滤）", value=False, 
+                                                       help=f"当前过滤条件: Options Impact ≥ {min_options_impact}%")
+                        
+                        # 根据选项决定使用哪个数据集
+                        if show_all_stocks:
+                            display_df = sg_df.copy()
+                            st.caption(f"📊 显示全部 {len(display_df)} 只股票")
+                        else:
+                            display_df = sg_filtered.copy()
+                            st.caption(f"📊 显示 {len(display_df)} 只股票 (Options Impact ≥ {min_options_impact}%)")
+                        
                         full_cols = ['Symbol', 'Current Price', 'Trade_Signal', 'Price_Position', 
                                     'Option_Structure', 'Vol_Regime', 'Gamma_Magnet', 'Delta Ratio', 'Gamma Ratio',
                                     'Put Wall', 'Call Wall', 'Hedge Wall', 'Dist_to_PW_%', 'Dist_to_CW_%', 
                                     'Options Impact', 'Volume Ratio', 'Next Exp Gamma']
-                        available_cols = [c for c in full_cols if c in sg_filtered.columns]
-                        df_sorted = sg_filtered.sort_values('Options Impact', ascending=False)
+                        available_cols = [c for c in full_cols if c in display_df.columns]
+                        df_sorted = display_df.sort_values('Options Impact', ascending=False)
                         st.dataframe(df_sorted[available_cols].round(2), use_container_width=True, hide_index=True)
                     
                     # ===== 交叉验证 =====
