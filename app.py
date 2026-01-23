@@ -2240,7 +2240,7 @@ def main():
                     
                     # 识别新标的并添加到追踪
                     new_symbols = []
-                    updated_signals = []
+                    reset_symbols = []  # 信号变化重置的标的
                     for _, row in sg_filtered.iterrows():
                         symbol = row['Symbol']
                         # 正确获取Trade_Signal
@@ -2251,20 +2251,25 @@ def main():
                             tracking_data[symbol] = add_new_tracking(symbol, row, signal_type, today_str)
                             new_symbols.append(symbol)
                         else:
-                            # 已存在的标的，更新信号类型（如果信号变化）
+                            # 已存在的标的，检查信号是否变化
                             old_signal = tracking_data[symbol].get('signal_type', '')
                             if signal_type != old_signal and signal_type != '未知信号':
-                                tracking_data[symbol]['signal_type'] = signal_type
-                                updated_signals.append(f"{symbol}: {old_signal[:15]}→{signal_type[:15]}")
-                            tracking_data[symbol]['is_new'] = False
+                                # 选项C：信号变化时完全重置记录
+                                old_direction = tracking_data[symbol].get('signal_direction', 'neutral')
+                                # 创建新记录（重置入场价格、追踪日期等）
+                                tracking_data[symbol] = add_new_tracking(symbol, row, signal_type, today_str)
+                                new_direction = tracking_data[symbol].get('signal_direction', 'neutral')
+                                reset_symbols.append(f"{symbol}: {old_signal[:12]}({old_direction})→{signal_type[:12]}({new_direction})")
+                            else:
+                                tracking_data[symbol]['is_new'] = False
                     
                     # 保存更新
-                    if new_symbols or updated_signals:
+                    if new_symbols or reset_symbols:
                         save_tracking_data(tracking_data)
                         if new_symbols:
                             st.success(f"🆕 新增追踪: {', '.join(new_symbols)}")
-                        if updated_signals:
-                            st.info(f"🔄 信号更新: {'; '.join(updated_signals)}")
+                        if reset_symbols:
+                            st.warning(f"🔄 信号变化，已重置追踪: {'; '.join(reset_symbols)}")
                     
                     # 操作按钮行
                     col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
