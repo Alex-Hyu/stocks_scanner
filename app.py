@@ -1857,10 +1857,16 @@ def main():
                     # 统计各类信号
                     col1, col2, col3, col4, col5, col6 = st.columns(6)
                     
-                    bullish_count = len(sg_filtered[sg_filtered['Signal_Type'] == 'bullish'])
-                    bearish_count = len(sg_filtered[sg_filtered['Signal_Type'] == 'bearish'])
-                    watch_bull = len(sg_filtered[sg_filtered['Signal_Type'] == 'bullish_watch'])
-                    watch_bear = len(sg_filtered[sg_filtered['Signal_Type'] == 'bearish_watch'])
+                    # 统计做多类信号（包含新类型）
+                    bullish_types = ['bullish', 'strong_bullish', 'bullish_cautious']
+                    bearish_types = ['bearish', 'strong_bearish']
+                    watch_bull_types = ['bullish_watch', 'mean_reversion']
+                    watch_bear_types = ['bearish_watch', 'trend_follow']
+                    
+                    bullish_count = len(sg_filtered[sg_filtered['Signal_Type'].isin(bullish_types)])
+                    bearish_count = len(sg_filtered[sg_filtered['Signal_Type'].isin(bearish_types)])
+                    watch_bull = len(sg_filtered[sg_filtered['Signal_Type'].isin(watch_bull_types)])
+                    watch_bear = len(sg_filtered[sg_filtered['Signal_Type'].isin(watch_bear_types)])
                     spring_count = len(sg_filtered[sg_filtered['Trade_Signal'].str.contains('弹簧蓄势', na=False)])
                     
                     # 统计波动环境
@@ -1868,15 +1874,15 @@ def main():
                     trending_count = len(sg_filtered[sg_filtered['Vol_Regime_Type'] == 'trending'])
                     
                     with col1:
-                        st.metric("🟢 高确信做多", bullish_count)
+                        st.metric("🟢 高确信做多", bullish_count, help="包含: bullish, strong_bullish, bullish_cautious")
                     with col2:
-                        st.metric("🔴 高确信做空", bearish_count)
+                        st.metric("🔴 高确信做空", bearish_count, help="包含: bearish, strong_bearish")
                     with col3:
                         st.metric("🔋 弹簧蓄势", spring_count)
                     with col4:
-                        st.metric("🟢 偏多观察", watch_bull)
+                        st.metric("🟢 偏多观察", watch_bull, help="包含: bullish_watch, mean_reversion")
                     with col5:
-                        st.metric("🔴 偏空观察", watch_bear)
+                        st.metric("🔴 偏空观察", watch_bear, help="包含: bearish_watch, trend_follow")
                     with col6:
                         st.metric("📈 趋势环境", trending_count, help="价格<Hedge Wall，高波动")
                     
@@ -1899,9 +1905,9 @@ def main():
                     
                     # ===== 🟢 高确信做多信号 =====
                     st.subheader("🟢 高确信做多信号")
-                    st.caption("中间区域: Put主导+高OI+高NEG → Squeeze Up | 近PW(≤3%): 支撑区可博反弹 | 突破CW: 加速上涨")
+                    st.caption("临界PW+正Gamma=支撑做多 | 临界CW+负Gamma=突破做多 | 已突破CW+负Gamma=🚀强势做多")
                     
-                    bullish_signals = sg_filtered[sg_filtered['Signal_Type'] == 'bullish'].copy()
+                    bullish_signals = sg_filtered[sg_filtered['Signal_Type'].isin(bullish_types)].copy()
                     bullish_signals = bullish_signals.sort_values('Options Impact', ascending=False)
                     
                     if len(bullish_signals) > 0:
@@ -1933,9 +1939,9 @@ def main():
                     
                     # ===== 🔴 高确信做空信号 =====
                     st.subheader("🔴 高确信做空信号")
-                    st.caption("中间区域: Call主导+高OI+高NEG → Squeeze Down | 近CW(≤3%): 阻力区谨慎做多 | 跌破PW: 加速下跌")
+                    st.caption("临界CW+正Gamma=阻力减仓 | 临界PW+负Gamma=破位做空 | 已跌破PW+负Gamma=💀强势做空")
                     
-                    bearish_signals = sg_filtered[sg_filtered['Signal_Type'] == 'bearish'].copy()
+                    bearish_signals = sg_filtered[sg_filtered['Signal_Type'].isin(bearish_types)].copy()
                     bearish_signals = bearish_signals.sort_values('Options Impact', ascending=False)
                     
                     if len(bearish_signals) > 0:
@@ -2001,7 +2007,8 @@ def main():
                     
                     # ===== 观察名单 =====
                     with st.expander("👀 观察名单（等待接近关键位置）"):
-                        watch_signals = sg_filtered[sg_filtered['Signal_Type'].isin(['bullish_watch', 'bearish_watch'])].copy()
+                        all_watch_types = ['bullish_watch', 'bearish_watch', 'mean_reversion', 'trend_follow', 'neutral']
+                        watch_signals = sg_filtered[sg_filtered['Signal_Type'].isin(all_watch_types)].copy()
                         watch_signals = watch_signals.sort_values('Options Impact', ascending=False)
                         
                         if len(watch_signals) > 0:
