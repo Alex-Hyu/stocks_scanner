@@ -456,11 +456,13 @@ def add_new_tracking(symbol, row, signal_type, today_str):
     except:
         track_end = (datetime.now() + timedelta(days=10)).strftime('%Y-%m-%d')
     
-    # 判断信号方向 - 使用Signal_Type字段
+    # 判断信号方向 - 使用Signal_Type字段（包含所有新类型）
     sig_type = row.get('Signal_Type', '')
-    if sig_type in ['bullish', 'bullish_watch']:
+    # 做多类型：bullish, strong_bullish, bullish_cautious, bullish_watch, mean_reversion
+    if sig_type in ['bullish', 'strong_bullish', 'bullish_cautious', 'bullish_watch', 'mean_reversion']:
         signal_direction = 'bullish'
-    elif sig_type in ['bearish', 'bearish_watch']:
+    # 做空类型：bearish, strong_bearish, bearish_watch, trend_follow
+    elif sig_type in ['bearish', 'strong_bearish', 'bearish_watch', 'trend_follow']:
         signal_direction = 'bearish'
     else:
         signal_direction = 'neutral'
@@ -538,17 +540,20 @@ def calculate_signal_accuracy_stats(tracking_data):
         signal_type_text = record.get('signal_type', '')
         
         # 如果没有signal_direction字段（旧记录），从signal_type文本推断
-        # 【更新】添加新的信号关键词
+        # 【更新】添加新的信号关键词（包含所有新类型）
         if not direction or direction == 'neutral':
             # 做多信号关键词
             bullish_keywords = [
                 '做多', '反弹', '偏多', 'bullish', 
-                'Squeeze Up', '突破CW', 'PW支撑区', '弹簧蓄势', '正Gamma轧空'
+                'Squeeze Up', '突破CW', 'PW支撑区', '弹簧蓄势', '正Gamma轧空',
+                '强势做多', '谨慎追多', '谨慎抄底', '支撑做多', '突破做多',
+                '接近支撑', '突破潜力', '均值回归', '趋势跟随'
             ]
             # 做空信号关键词
             bearish_keywords = [
                 '做空', '压力', '偏空', '破位', 'bearish',
-                'Squeeze Down', '跌破PW', 'CW阻力区', '负Gamma螺旋'
+                'Squeeze Down', '跌破PW', 'CW阻力区', '负Gamma螺旋',
+                '强势做空', '阻力减仓', '破位做空', '接近阻力', '破位风险'
             ]
             
             if any(x in signal_type_text for x in bullish_keywords):
@@ -2125,11 +2130,11 @@ def main():
                                 sg_signal = sg_row['Trade_Signal']
                                 sg_type = sg_row['Signal_Type']
                                 
-                                # 方向一致性判断
+                                # 方向一致性判断（包含所有新类型）
                                 tech_bullish = '多' in tech_direction
                                 tech_bearish = '空' in tech_direction
-                                sg_bullish = sg_type in ['bullish', 'bullish_watch']
-                                sg_bearish = sg_type in ['bearish', 'bearish_watch']
+                                sg_bullish = sg_type in ['bullish', 'strong_bullish', 'bullish_cautious', 'bullish_watch', 'mean_reversion']
+                                sg_bearish = sg_type in ['bearish', 'strong_bearish', 'bearish_watch', 'trend_follow']
                                 
                                 if (tech_bullish and sg_bullish) or (tech_bearish and sg_bearish):
                                     consistency = "✅ 方向一致"
@@ -2513,17 +2518,20 @@ def main():
                             is_new = record.get('is_new', False)
                             
                             # 如果没有signal_direction字段（旧记录），从signal_type文本推断
-                            # 【更新】添加新的信号关键词
+                            # 【更新】添加新的信号关键词（包含所有新类型）
                             if not direction or direction == 'neutral':
                                 # 做多信号关键词
                                 bullish_keywords = [
                                     '做多', '反弹', '偏多', 'bullish', 
-                                    'Squeeze Up', '突破CW', 'PW支撑区', '弹簧蓄势', '正Gamma轧空'
+                                    'Squeeze Up', '突破CW', 'PW支撑区', '弹簧蓄势', '正Gamma轧空',
+                                    '强势做多', '谨慎追多', '谨慎抄底', '支撑做多', '突破做多',
+                                    '接近支撑', '突破潜力', '均值回归', '趋势跟随'
                                 ]
                                 # 做空信号关键词
                                 bearish_keywords = [
                                     '做空', '压力', '偏空', '破位', 'bearish',
-                                    'Squeeze Down', '跌破PW', 'CW阻力区', '负Gamma螺旋'
+                                    'Squeeze Down', '跌破PW', 'CW阻力区', '负Gamma螺旋',
+                                    '强势做空', '阻力减仓', '破位做空', '接近阻力', '破位风险'
                                 ]
                                 
                                 if any(x in signal_type_text for x in bullish_keywords):
