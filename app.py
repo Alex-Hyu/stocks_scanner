@@ -1553,142 +1553,220 @@ def calculate_gamma_direction(call_gamma, put_gamma):
     else:
         return put_ratio, max(call_g, put_g), "neutral"
 
-def analyze_expiry_direction(row):
-    """
-    分析到期方向，综合Gamma和Volume判断
-    
-    逻辑：
-    - Put Gamma大 + Put Volume大 → 到期后MM买入平仓 → 高开倾向
-    - Call Gamma大 + Call Volume大 → 到期后MM卖出平仓 → 低开倾向
-    """
-    call_gamma = parse_number_safe(row.get('Call Gamma'))
-    put_gamma = parse_number_safe(row.get('Put Gamma'))
-    call_vol = parse_number_safe(row.get('Next Expir Call Volume'))
-    put_vol = parse_number_safe(row.get('Next Expir Put Volume'))
-    
-    # Gamma判断
-    gamma_signal = "neutral"
-    gamma_detail = ""
-    
-    if call_gamma is not None and put_gamma is not None:
-        call_g = abs(call_gamma)
-        put_g = abs(put_gamma)
-        
-        if call_g + put_g > 0:
-            put_ratio = put_g / (call_g + put_g)
-            
-            if put_ratio > 0.6:
-                gamma_signal = "put_dominant"
-                gamma_detail = f"Put Gamma主导 ({put_ratio*100:.0f}%)"
-            elif put_ratio < 0.4:
-                gamma_signal = "call_dominant"
-                gamma_detail = f"Call Gamma主导 ({(1-put_ratio)*100:.0f}%)"
-            else:
-                gamma_signal = "neutral"
-                gamma_detail = f"Gamma均衡 (Put {put_ratio*100:.0f}%)"
-    
-    # Volume判断
-    vol_signal = "neutral"
-    vol_detail = ""
-    
-    if call_vol is not None and put_vol is not None:
-        if call_vol + put_vol > 0:
-            put_vol_ratio = put_vol / (call_vol + put_vol)
-            
-            if put_vol_ratio > 0.55:
-                vol_signal = "put_dominant"
-                vol_detail = f"Put成交活跃 ({put_vol_ratio*100:.0f}%)"
-            elif put_vol_ratio < 0.45:
-                vol_signal = "call_dominant"
-                vol_detail = f"Call成交活跃 ({(1-put_vol_ratio)*100:.0f}%)"
-            else:
-                vol_signal = "neutral"
-                vol_detail = f"成交均衡"
-    
-    # 综合判断
-    if gamma_signal == "put_dominant" and vol_signal == "put_dominant":
-        direction = "strong_bullish"
-        prediction = "🚀 强势高开"
-        logic = f"{gamma_detail} + {vol_detail} → MM大量Put到期需买入平仓"
-    elif gamma_signal == "call_dominant" and vol_signal == "call_dominant":
-        direction = "strong_bearish"
-        prediction = "💀 强势低开"
-        logic = f"{gamma_detail} + {vol_detail} → MM大量Call到期需卖出平仓"
-    elif gamma_signal == "put_dominant":
-        direction = "bullish"
-        prediction = "📈 偏高开"
-        logic = f"{gamma_detail} → Put到期MM买入平仓倾向"
-    elif gamma_signal == "call_dominant":
-        direction = "bearish"
-        prediction = "📉 偏低开"
-        logic = f"{gamma_detail} → Call到期MM卖出平仓倾向"
-    elif vol_signal == "put_dominant":
-        direction = "bullish"
-        prediction = "📈 轻微高开"
-        logic = f"{vol_detail} → Put成交活跃，到期有买盘"
-    elif vol_signal == "call_dominant":
-        direction = "bearish"
-        prediction = "📉 轻微低开"
-        logic = f"{vol_detail} → Call成交活跃，到期有卖压"
-    else:
-        direction = "neutral"
-        prediction = "⚖️ 方向不明"
-        logic = "Gamma和Volume均衡，需结合价格位置判断"
-    
-    return {
-        'gamma_signal': gamma_signal,
-        'gamma_detail': gamma_detail,
-        'vol_signal': vol_signal,
-        'vol_detail': vol_detail,
-        'direction': direction,
-        'prediction': prediction,
-        'logic': logic
-    }
-
 def get_neg_strength(neg):
-    """获取NEG强度"""
+    """
+    获取NEG强度 - 基于做市商解绑压力
+    >35% = 强信号（高浓度，解绑压力大）
+    25-35% = 中等信号
+    <25% = 弱信号（不建议操作）
+    """
     neg_val = parse_number_safe(str(neg).replace('%', '')) if neg else 0
     if neg_val is None:
         neg_val = 0
     if neg_val < 1:
         neg_val = neg_val * 100
     
-    if neg_val > 40:
+    if neg_val >= 35:
         return neg_val, "⭐⭐⭐", "strong"
-    elif neg_val > 25:
+    elif neg_val >= 25:
         return neg_val, "⭐⭐", "medium"
     else:
         return neg_val, "⭐", "weak"
 
-def predict_monday_gap(friday_close_position, expiry_direction, neg_strength):
-    """预测下周一跳空方向 - 结合价格位置和到期方向"""
-    confidence = "⭐⭐⭐" if neg_strength == "strong" else ("⭐⭐" if neg_strength == "medium" else "⭐")
+def analyze_mm_unwinding(row):
+    """
+    分析做市商解绑效应（MM Unwinding Analysis）
     
-    direction = expiry_direction.get('direction', 'neutral')
-    base_prediction = expiry_direction.get('prediction', '⚖️ 方向不明')
+    核心逻辑：
+    周五收盘时，大量期权合约作废。做市商必须在周一开盘前后，
+    平掉（卖出或买回）他们为了对冲这些合约而持有的底层股票。
     
-    # 价格位置强化或冲突
-    if friday_close_position == "above_cw":
-        if direction in ["strong_bullish", "bullish"]:
-            return f"🚀 强势高开 {confidence}", "strong_bullish", f"位置>CW + {expiry_direction['logic']}"
-        elif direction in ["strong_bearish", "bearish"]:
-            return f"⚠️ 信号冲突 {confidence}", "neutral", f"位置>CW(看多) vs {expiry_direction['logic']} → 观望"
+    1. Bearish Unwinding（跳空低开）条件：
+       - 高浓度：NEG > 35%
+       - 位置关键：收盘价 >= Call Wall 或 距离CW < 0.5%
+       - 对冲状态：Next Exp Delta为正值（MM持有多头对冲Call）
+       → 周一MM需卖出多头股票
+    
+    2. Bullish Unwinding（跳空高开）条件：
+       - 高浓度：NEG > 35%
+       - 位置关键：收盘价 <= Put Wall 或 距离PW < 0.5%
+       - 对冲状态：Next Exp Delta为负值（MM持有空头对冲Put）
+       → 周一MM需买回股票空头
+    """
+    current_price = parse_number_safe(row.get('Current Price'))
+    call_wall = parse_number_safe(row.get('Call Wall'))
+    put_wall = parse_number_safe(row.get('Put Wall'))
+    neg = row.get('Next Exp Gamma')
+    
+    # Next Exp Delta - 关键指标
+    next_exp_delta = parse_number_safe(row.get('Next Exp Delta'))
+    
+    # Call/Put Volume用于辅助验证
+    call_vol = parse_number_safe(row.get('Next Expir Call Volume'))
+    put_vol = parse_number_safe(row.get('Next Expir Put Volume'))
+    
+    # NEG强度
+    neg_val, neg_stars, neg_strength = get_neg_strength(neg)
+    
+    # 计算偏离度
+    dist_to_cw = None
+    dist_to_pw = None
+    if current_price and call_wall and call_wall > 0:
+        dist_to_cw = (current_price - call_wall) / current_price * 100  # 正数=在CW上方
+    if current_price and put_wall and put_wall > 0:
+        dist_to_pw = (current_price - put_wall) / current_price * 100   # 正数=在PW上方
+    
+    # 位置判定
+    near_cw = dist_to_cw is not None and -0.5 <= dist_to_cw <= 1.0  # 距离CW在-0.5%到+1%之间
+    near_pw = dist_to_pw is not None and -1.0 <= dist_to_pw <= 0.5  # 距离PW在-1%到+0.5%之间
+    above_cw = dist_to_cw is not None and dist_to_cw > 0
+    below_pw = dist_to_pw is not None and dist_to_pw < 0
+    
+    # Delta方向判断
+    delta_positive = next_exp_delta is not None and next_exp_delta > 0  # MM持有多头
+    delta_negative = next_exp_delta is not None and next_exp_delta < 0  # MM持有空头
+    delta_strong_positive = next_exp_delta is not None and next_exp_delta > 0.3
+    delta_strong_negative = next_exp_delta is not None and next_exp_delta < -0.3
+    
+    # Volume趋势（Put/Call比值）
+    vol_ratio = None
+    if call_vol and put_vol and (call_vol + put_vol) > 0:
+        vol_ratio = put_vol / (call_vol + put_vol)
+    
+    # ========== 信号判定 ==========
+    signal_type = "neutral"
+    prediction = "⚖️ 观望"
+    confidence = neg_stars
+    logic_parts = []
+    warnings = []
+    
+    # 检查信号强度
+    if neg_strength == "weak":
+        signal_type = "weak"
+        prediction = "⚪ 弱信号"
+        logic_parts.append(f"NEG {neg_val:.1f}% < 25%，浓度不足")
+    
+    else:
+        # ===== Bearish Unwinding 判定 =====
+        bearish_conditions = []
+        bearish_score = 0
+        
+        # 条件A：高浓度
+        if neg_strength == "strong":
+            bearish_conditions.append(f"✓ 高浓度 NEG={neg_val:.1f}%")
+            bearish_score += 2
+        elif neg_strength == "medium":
+            bearish_conditions.append(f"○ 中浓度 NEG={neg_val:.1f}%")
+            bearish_score += 1
+        
+        # 条件B：位置在Call Wall附近或上方
+        if above_cw or near_cw:
+            dist_str = f"{dist_to_cw:+.2f}%" if dist_to_cw else ""
+            bearish_conditions.append(f"✓ 接近CW {dist_str}")
+            bearish_score += 2
+        
+        # 条件C：Delta为正（MM持有多头）
+        if delta_positive:
+            delta_str = f"{next_exp_delta:.2f}" if next_exp_delta else ""
+            bearish_conditions.append(f"✓ Delta正值={delta_str}（MM持多头）")
+            bearish_score += 2 if delta_strong_positive else 1
+        
+        # 辅助：Call Volume活跃
+        if vol_ratio and vol_ratio < 0.45:
+            bearish_conditions.append(f"✓ Call成交活跃")
+            bearish_score += 1
+        
+        # ===== Bullish Unwinding 判定 =====
+        bullish_conditions = []
+        bullish_score = 0
+        
+        # 条件A：高浓度
+        if neg_strength == "strong":
+            bullish_conditions.append(f"✓ 高浓度 NEG={neg_val:.1f}%")
+            bullish_score += 2
+        elif neg_strength == "medium":
+            bullish_conditions.append(f"○ 中浓度 NEG={neg_val:.1f}%")
+            bullish_score += 1
+        
+        # 条件B：位置在Put Wall附近或下方
+        if below_pw or near_pw:
+            dist_str = f"{dist_to_pw:+.2f}%" if dist_to_pw else ""
+            bullish_conditions.append(f"✓ 接近PW {dist_str}")
+            bullish_score += 2
+        
+        # 条件C：Delta为负（MM持有空头）
+        if delta_negative:
+            delta_str = f"{next_exp_delta:.2f}" if next_exp_delta else ""
+            bullish_conditions.append(f"✓ Delta负值={delta_str}（MM持空头）")
+            bullish_score += 2 if delta_strong_negative else 1
+        
+        # 辅助：Put Volume活跃
+        if vol_ratio and vol_ratio > 0.55:
+            bullish_conditions.append(f"✓ Put成交活跃")
+            bullish_score += 1
+        
+        # ===== 最终判定 =====
+        if bearish_score >= 4 and bearish_score > bullish_score:
+            # Bearish Unwinding
+            if bearish_score >= 6:
+                signal_type = "strong_bearish"
+                prediction = f"💀 强势低开 {confidence}"
+            else:
+                signal_type = "bearish"
+                prediction = f"📉 偏低开 {confidence}"
+            logic_parts = bearish_conditions
+            logic_parts.append("→ 周一MM需卖出多头对冲")
+            
+        elif bullish_score >= 4 and bullish_score > bearish_score:
+            # Bullish Unwinding
+            if bullish_score >= 6:
+                signal_type = "strong_bullish"
+                prediction = f"🚀 强势高开 {confidence}"
+            else:
+                signal_type = "bullish"
+                prediction = f"📈 偏高开 {confidence}"
+            logic_parts = bullish_conditions
+            logic_parts.append("→ 周一MM需买回空头对冲")
+            
+        elif bearish_score >= 3 or bullish_score >= 3:
+            # 条件部分满足
+            if bearish_score > bullish_score:
+                signal_type = "bearish_watch"
+                prediction = f"📉 倾向低开（条件不完整）{confidence}"
+                logic_parts = bearish_conditions
+            elif bullish_score > bearish_score:
+                signal_type = "bullish_watch"
+                prediction = f"📈 倾向高开（条件不完整）{confidence}"
+                logic_parts = bullish_conditions
+            else:
+                signal_type = "neutral"
+                prediction = f"⚖️ 信号冲突 {confidence}"
+                logic_parts.append(f"多空条件均衡：看跌{bearish_score}分 vs 看涨{bullish_score}分")
         else:
-            return f"📈 偏高开 {confidence}", "bullish", f"位置>CW支撑高开"
+            signal_type = "neutral"
+            prediction = f"⚖️ 条件不足 {confidence}"
+            logic_parts.append("位置和Delta条件均不满足")
     
-    elif friday_close_position == "below_pw":
-        if direction in ["strong_bearish", "bearish"]:
-            return f"💀 强势低开 {confidence}", "strong_bearish", f"位置<PW + {expiry_direction['logic']}"
-        elif direction in ["strong_bullish", "bullish"]:
-            return f"⚠️ 信号冲突 {confidence}", "neutral", f"位置<PW(看空) vs {expiry_direction['logic']} → 观望"
-        else:
-            return f"📉 偏低开 {confidence}", "bearish", f"位置<PW压制低开"
-    
-    else:  # 区间内
-        return f"{base_prediction} {confidence}", direction, expiry_direction['logic']
+    return {
+        'signal_type': signal_type,
+        'prediction': prediction,
+        'logic': ' | '.join(logic_parts),
+        'neg_val': neg_val,
+        'neg_stars': neg_stars,
+        'neg_strength': neg_strength,
+        'dist_to_cw': dist_to_cw,
+        'dist_to_pw': dist_to_pw,
+        'next_exp_delta': next_exp_delta,
+        'vol_ratio': vol_ratio,
+        'warnings': warnings
+    }
 
 def analyze_friday_expiry(df):
-    """分析周五到期Gamma数据 - 使用新逻辑"""
+    """
+    分析周五到期Gamma数据 - 基于做市商解绑框架
+    
+    核心逻辑：周五大量期权到期，做市商需在周一平仓对冲头寸
+    """
     results = []
     
     for _, row in df.iterrows():
@@ -1699,43 +1777,26 @@ def analyze_friday_expiry(df):
         current_price = parse_number_safe(row.get('Current Price'))
         call_wall = parse_number_safe(row.get('Call Wall'))
         put_wall = parse_number_safe(row.get('Put Wall'))
-        neg = row.get('Next Exp Gamma')
         
-        # 分析到期方向
-        expiry_analysis = analyze_expiry_direction(row)
+        # 做市商解绑分析
+        unwinding = analyze_mm_unwinding(row)
         
-        # NEG强度
-        neg_val, neg_stars, neg_strength = get_neg_strength(neg)
-        
-        # 当前位置
-        current_position = "in_range"
-        if current_price and call_wall and current_price > call_wall:
-            current_position = "above_cw"
-        elif current_price and put_wall and current_price < put_wall:
-            current_position = "below_pw"
-        
-        # 预测
-        prediction, pred_type, pred_logic = predict_monday_gap(current_position, expiry_analysis, neg_strength)
-        
+        # 构建结果
         results.append({
             'Symbol': symbol,
             'Current Price': current_price,
             'Call Wall': call_wall,
             'Put Wall': put_wall,
-            'Call Gamma': row.get('Call Gamma'),
-            'Put Gamma': row.get('Put Gamma'),
-            'Call Volume': row.get('Next Expir Call Volume'),
-            'Put Volume': row.get('Next Expir Put Volume'),
-            'Gamma Signal': expiry_analysis['gamma_detail'],
-            'Vol Signal': expiry_analysis['vol_detail'],
-            'Direction': expiry_analysis['direction'],
-            'NEG': neg_val,
-            'NEG Stars': neg_stars,
-            'NEG Strength': neg_strength,
-            'Current Position': current_position,
-            'Prediction': prediction,
-            'Pred Type': pred_type,
-            'Pred Logic': pred_logic,
+            'NEG': unwinding['neg_val'],
+            'NEG Stars': unwinding['neg_stars'],
+            'NEG Strength': unwinding['neg_strength'],
+            'Dist_to_CW': unwinding['dist_to_cw'],
+            'Dist_to_PW': unwinding['dist_to_pw'],
+            'Next Exp Delta': unwinding['next_exp_delta'],
+            'Vol Ratio': unwinding['vol_ratio'],
+            'Signal Type': unwinding['signal_type'],
+            'Prediction': unwinding['prediction'],
+            'Logic': unwinding['logic'],
             'Pinning Range': f"{put_wall:.0f} - {call_wall:.0f}" if put_wall and call_wall else "N/A"
         })
     
@@ -2060,38 +2121,58 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                 
                 if not friday_results.empty:
                     # 统计
-                    st.subheader("📊 到期方向概览")
+                    st.subheader("📊 做市商解绑信号概览")
+                    st.caption("基于MM Unwinding效应：高浓度+关键位置+Delta方向")
                     
-                    bullish_count = len(friday_results[friday_results['Direction'].isin(['strong_bullish', 'bullish'])])
-                    bearish_count = len(friday_results[friday_results['Direction'].isin(['strong_bearish', 'bearish'])])
-                    neutral_count = len(friday_results[friday_results['Direction'] == 'neutral'])
+                    strong_bearish = len(friday_results[friday_results['Signal Type'] == 'strong_bearish'])
+                    bearish = len(friday_results[friday_results['Signal Type'] == 'bearish'])
+                    strong_bullish = len(friday_results[friday_results['Signal Type'] == 'strong_bullish'])
+                    bullish = len(friday_results[friday_results['Signal Type'] == 'bullish'])
+                    weak_count = len(friday_results[friday_results['Signal Type'] == 'weak'])
                     
-                    col1, col2, col3, col4 = st.columns(4)
+                    col1, col2, col3, col4, col5 = st.columns(5)
                     with col1:
-                        st.metric("📈 偏高开", bullish_count, "Put Gamma/Vol主导")
+                        st.metric("🚀 高开信号", strong_bullish + bullish, f"强{strong_bullish} 弱{bullish}")
                     with col2:
-                        st.metric("📉 偏低开", bearish_count, "Call Gamma/Vol主导")
+                        st.metric("💀 低开信号", strong_bearish + bearish, f"强{strong_bearish} 弱{bearish}")
                     with col3:
-                        st.metric("⚖️ 方向不明", neutral_count)
+                        st.metric("⚪ 弱信号", weak_count, "NEG<25%")
                     with col4:
+                        high_neg = len(friday_results[friday_results['NEG'] >= 35])
+                        st.metric("⭐ 高浓度", high_neg, "NEG≥35%")
+                    with col5:
                         st.metric("📊 总计", len(friday_results))
                     
                     st.divider()
                     
-                    # 高NEG标的
-                    st.subheader("🎯 高NEG标的 (>25%)")
-                    high_neg = friday_results[friday_results['NEG'] > 25].sort_values('NEG', ascending=False)
+                    # 强信号标的
+                    st.subheader("🎯 强信号标的 (NEG≥25%)")
                     
-                    if not high_neg.empty:
-                        for _, row in high_neg.iterrows():
-                            direction = row.get('Direction', 'neutral')
-                            dir_emoji = "🚀" if direction == 'strong_bullish' else (
-                                "📈" if direction == 'bullish' else (
-                                    "💀" if direction == 'strong_bearish' else (
-                                        "📉" if direction == 'bearish' else "⚖️"
-                                    )
-                                )
-                            )
+                    strong_signals = friday_results[
+                        (friday_results['NEG'] >= 25) & 
+                        (friday_results['Signal Type'].isin(['strong_bearish', 'bearish', 'strong_bullish', 'bullish']))
+                    ].sort_values('NEG', ascending=False)
+                    
+                    if not strong_signals.empty:
+                        for _, row in strong_signals.iterrows():
+                            sig_type = row.get('Signal Type', 'neutral')
+                            
+                            # 信号图标
+                            if sig_type == 'strong_bearish':
+                                sig_icon = "💀"
+                                sig_color = "error"
+                            elif sig_type == 'bearish':
+                                sig_icon = "📉"
+                                sig_color = "warning"
+                            elif sig_type == 'strong_bullish':
+                                sig_icon = "🚀"
+                                sig_color = "success"
+                            elif sig_type == 'bullish':
+                                sig_icon = "📈"
+                                sig_color = "info"
+                            else:
+                                sig_icon = "⚖️"
+                                sig_color = "info"
                             
                             with st.container():
                                 col1, col2 = st.columns([1, 2])
@@ -2099,30 +2180,39 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                     price_str = f"${row['Current Price']:.2f}" if row['Current Price'] else "N/A"
                                     st.markdown(f"**{row['Symbol']}** {price_str}")
                                     st.caption(f"NEG: {row['NEG']:.1f}% {row['NEG Stars']}")
+                                    
+                                    # 显示偏离度
+                                    if row.get('Dist_to_CW') is not None:
+                                        st.caption(f"距CW: {row['Dist_to_CW']:+.2f}%")
+                                    if row.get('Dist_to_PW') is not None:
+                                        st.caption(f"距PW: {row['Dist_to_PW']:+.2f}%")
+                                
                                 with col2:
-                                    st.write(f"{dir_emoji} **{row['Prediction']}**")
-                                    gamma_sig = row.get('Gamma Signal', '')
-                                    vol_sig = row.get('Vol Signal', '')
-                                    if gamma_sig:
-                                        st.write(f"Gamma: {gamma_sig}")
-                                    if vol_sig:
-                                        st.write(f"Volume: {vol_sig}")
+                                    st.markdown(f"{sig_icon} **{row['Prediction']}**")
+                                    
+                                    # 显示Next Exp Delta
+                                    if row.get('Next Exp Delta') is not None:
+                                        delta_val = row['Next Exp Delta']
+                                        delta_desc = "MM持多头" if delta_val > 0 else "MM持空头"
+                                        st.write(f"Next Exp Delta: {delta_val:.2f} ({delta_desc})")
+                                    
                                     st.write(f"Pinning区间: {row['Pinning Range']}")
-                                    st.caption(f"逻辑: {row['Pred Logic']}")
+                                    st.caption(f"判定逻辑: {row['Logic']}")
                                 st.divider()
                     else:
-                        st.info("暂无高NEG标的 (NEG>25%)")
+                        st.info("暂无强信号标的 (NEG≥25% 且有方向信号)")
                     
                     # 完整表格
                     with st.expander("📋 查看完整分析表"):
-                        display_cols = ['Symbol', 'Current Price', 'Call Wall', 'Put Wall', 
-                                       'Gamma Signal', 'Vol Signal', 'NEG', 'NEG Stars', 'Prediction']
+                        display_cols = ['Symbol', 'Current Price', 'NEG', 'NEG Stars', 
+                                       'Dist_to_CW', 'Dist_to_PW', 'Next Exp Delta',
+                                       'Signal Type', 'Prediction', 'Logic']
                         available_cols = [c for c in display_cols if c in friday_results.columns]
-                        st.dataframe(friday_results[available_cols], use_container_width=True, hide_index=True)
+                        st.dataframe(friday_results[available_cols].round(2), use_container_width=True, hide_index=True)
                     
                     # 追踪功能
-                    st.subheader("📈 周五到期 追踪")
-                    st.caption("追踪周期：本周 → 下周二，验证跳空预测准确性")
+                    st.subheader("📈 周五到期 追踪验证")
+                    st.caption("追踪周期：周五 → 下周二，验证跳空预测准确性")
                     
                     # 加载追踪数据
                     fe_tracking = load_worksheet_data("Friday_Expiry") or {}
@@ -2134,7 +2224,12 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                             new_count = 0
                             updated_count = 0
                             
-                            for _, row in friday_results.iterrows():
+                            # 只添加有方向信号的标的
+                            valid_signals = friday_results[
+                                friday_results['Signal Type'].isin(['strong_bearish', 'bearish', 'strong_bullish', 'bullish', 'bearish_watch', 'bullish_watch'])
+                            ]
+                            
+                            for _, row in valid_signals.iterrows():
                                 symbol = row['Symbol']
                                 
                                 if symbol not in fe_tracking:
@@ -2146,52 +2241,32 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                     
                                     fe_tracking[symbol] = {
                                         'week_start': today_str,
-                                        'entry_price': float(row['Current Price']) if row['Current Price'] else 0,
+                                        'friday_close': float(row['Current Price']) if row['Current Price'] else 0,
                                         'call_wall': float(row['Call Wall']) if row['Call Wall'] else 0,
                                         'put_wall': float(row['Put Wall']) if row['Put Wall'] else 0,
-                                        'gamma_signal': row.get('Gamma Signal', ''),
-                                        'vol_signal': row.get('Vol Signal', ''),
-                                        'direction': row.get('Direction', 'neutral'),
-                                        'neg_initial': row['NEG'],
-                                        'neg_history': {today_str: row['NEG']},
+                                        'neg': row['NEG'],
+                                        'dist_to_cw': row.get('Dist_to_CW'),
+                                        'dist_to_pw': row.get('Dist_to_PW'),
+                                        'next_exp_delta': row.get('Next Exp Delta'),
+                                        'signal_type': row['Signal Type'],
                                         'prediction': row['Prediction'],
-                                        'pred_type': row['Pred Type'],
-                                        'daily_prices': {today_str: float(row['Current Price']) if row['Current Price'] else 0},
+                                        'logic': row['Logic'],
+                                        'monday_open': None,  # 周一手动填入
+                                        'tuesday_close': None,  # 周二手动填入
+                                        'gap_pct': None,  # 跳空百分比
+                                        'trend_pct': None,  # 趋势百分比
+                                        'gap_correct': None,  # 跳空方向正确
+                                        'trend_correct': None,  # 趋势方向正确
                                         'track_end_date': track_end,
-                                        'status': 'tracking',
-                                        'neg_trend': 'stable'
+                                        'status': 'tracking'
                                     }
                                     new_count += 1
                                 else:
-                                    # 更新NEG历史
-                                    if 'neg_history' not in fe_tracking[symbol]:
-                                        fe_tracking[symbol]['neg_history'] = {}
-                                    fe_tracking[symbol]['neg_history'][today_str] = row['NEG']
-                                    
-                                    # NEG趋势
-                                    old_neg = fe_tracking[symbol].get('neg_initial', 0)
-                                    new_neg = row['NEG']
-                                    if new_neg > old_neg * 1.1:
-                                        fe_tracking[symbol]['neg_trend'] = 'rising'
-                                    elif new_neg < old_neg * 0.9:
-                                        fe_tracking[symbol]['neg_trend'] = 'falling'
-                                    
-                                    fe_tracking[symbol]['prediction'] = row['Prediction']
-                                    fe_tracking[symbol]['pred_type'] = row['Pred Type']
-                                    fe_tracking[symbol]['gamma_signal'] = row.get('Gamma Signal', '')
-                                    fe_tracking[symbol]['vol_signal'] = row.get('Vol Signal', '')
-                                    fe_tracking[symbol]['direction'] = row.get('Direction', 'neutral')
                                     updated_count += 1
                             
-                            # 标记消失的标的
-                            current_symbols = set(friday_results['Symbol'].tolist())
-                            for symbol in fe_tracking:
-                                if symbol not in current_symbols and fe_tracking[symbol].get('status') == 'tracking':
-                                    fe_tracking[symbol]['neg_trend'] = 'dropped_off'
-                            
-                            if new_count > 0 or updated_count > 0:
+                            if new_count > 0:
                                 save_worksheet_data("Friday_Expiry", fe_tracking)
-                                st.success(f"✅ 新增{new_count}个，更新{updated_count}个")
+                                st.success(f"✅ 新增{new_count}个（仅添加有方向信号的标的）")
                     
                     with col2:
                         if st.button("🔄 刷新价格", key="refresh_fe_prices"):
@@ -2200,13 +2275,10 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                 if fe_tracking[symbol].get('status') == 'tracking':
                                     price = get_current_price(symbol)
                                     if price:
-                                        if 'daily_prices' not in fe_tracking[symbol]:
-                                            fe_tracking[symbol]['daily_prices'] = {}
-                                        fe_tracking[symbol]['daily_prices'][today_str] = price
-                                        
-                                        entry_price = fe_tracking[symbol].get('entry_price', 0)
-                                        if entry_price > 0:
-                                            fe_tracking[symbol]['current_return'] = ((price - entry_price) / entry_price) * 100
+                                        fe_tracking[symbol]['current_price'] = price
+                                        friday_close = fe_tracking[symbol].get('friday_close', 0)
+                                        if friday_close > 0:
+                                            fe_tracking[symbol]['gap_pct'] = ((price - friday_close) / friday_close) * 100
                                         updated += 1
                             
                             save_worksheet_data("Friday_Expiry", fe_tracking)
@@ -2222,50 +2294,69 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                     if fe_tracking:
                         st.write(f"**追踪中: {len(fe_tracking)}个标的**")
                         
-                        # 统计
-                        correct = sum(1 for r in fe_tracking.values() if r.get('gap_direction_correct') == True)
-                        wrong = sum(1 for r in fe_tracking.values() if r.get('gap_direction_correct') == False)
-                        total_verified = correct + wrong
-                        accuracy = (correct / total_verified * 100) if total_verified > 0 else 0
+                        # 统计准确率
+                        gap_correct = sum(1 for r in fe_tracking.values() if r.get('gap_correct') == True)
+                        gap_wrong = sum(1 for r in fe_tracking.values() if r.get('gap_correct') == False)
+                        trend_correct = sum(1 for r in fe_tracking.values() if r.get('trend_correct') == True)
+                        trend_wrong = sum(1 for r in fe_tracking.values() if r.get('trend_correct') == False)
                         
-                        if total_verified > 0:
-                            st.metric("跳空预测准确率", f"{accuracy:.1f}%", f"{correct}/{total_verified} 正确")
+                        gap_verified = gap_correct + gap_wrong
+                        trend_verified = trend_correct + trend_wrong
+                        gap_accuracy = (gap_correct / gap_verified * 100) if gap_verified > 0 else 0
+                        trend_accuracy = (trend_correct / trend_verified * 100) if trend_verified > 0 else 0
+                        
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            if gap_verified > 0:
+                                st.metric("跳空准确率", f"{gap_accuracy:.1f}%", f"{gap_correct}/{gap_verified} 正确")
+                        with col2:
+                            if trend_verified > 0:
+                                st.metric("趋势准确率", f"{trend_accuracy:.1f}%", f"{trend_correct}/{trend_verified} 正确")
                         
                         # 追踪表格
                         tracking_rows = []
                         for symbol, record in fe_tracking.items():
-                            neg_trend_emoji = "📈" if record.get('neg_trend') == 'rising' else (
-                                "📉" if record.get('neg_trend') == 'falling' else (
-                                    "⚠️" if record.get('neg_trend') == 'dropped_off' else "➡️"
-                                )
-                            )
+                            # 信号图标
+                            sig_type = record.get('signal_type', 'neutral')
+                            if 'bullish' in sig_type:
+                                sig_icon = "📈"
+                            elif 'bearish' in sig_type:
+                                sig_icon = "📉"
+                            else:
+                                sig_icon = "⚖️"
                             
-                            gap_status = "✅" if record.get('gap_direction_correct') == True else (
-                                "❌" if record.get('gap_direction_correct') == False else "⏳"
+                            # 验证状态
+                            gap_status = "✅" if record.get('gap_correct') == True else (
+                                "❌" if record.get('gap_correct') == False else "⏳"
+                            )
+                            trend_status = "✅" if record.get('trend_correct') == True else (
+                                "❌" if record.get('trend_correct') == False else "⏳"
                             )
                             
                             tracking_rows.append({
                                 '标的': symbol,
-                                '入场价': f"${record.get('entry_price', 0):.2f}",
-                                '当前收益': f"{record.get('current_return', 0):.2f}%",
-                                'NEG初始': f"{record.get('neg_initial', 0):.1f}%",
-                                'NEG趋势': neg_trend_emoji,
-                                '预测': str(record.get('prediction', ''))[:25],
+                                '周五收盘': f"${record.get('friday_close', 0):.2f}" if record.get('friday_close') else "待填",
+                                'NEG': f"{record.get('neg', 0):.1f}%",
+                                '距CW%': f"{record.get('dist_to_cw', 0):+.2f}%" if record.get('dist_to_cw') else "-",
+                                '距PW%': f"{record.get('dist_to_pw', 0):+.2f}%" if record.get('dist_to_pw') else "-",
+                                '预测': f"{sig_icon} {str(record.get('prediction', ''))[:20]}",
+                                '周一开盘': f"${record.get('monday_open', 0):.2f}" if record.get('monday_open') else "待填",
+                                '跳空%': f"{record.get('gap_pct', 0):+.2f}%" if record.get('gap_pct') else "-",
                                 '跳空验证': gap_status,
-                                '状态': record.get('status', 'tracking')
+                                '趋势验证': trend_status
                             })
                         
                         st.dataframe(pd.DataFrame(tracking_rows), use_container_width=True, hide_index=True)
                         
-                        # 周五收盘记录
-                        with st.expander("📝 记录周五收盘/周一开盘"):
+                        # 记录价格输入
+                        with st.expander("📝 记录周五收盘/周一开盘/周二收盘"):
                             symbol_to_update = st.selectbox(
                                 "选择标的",
                                 options=list(fe_tracking.keys()),
                                 key="fe_symbol_update"
                             )
                             
-                            col1, col2 = st.columns(2)
+                            col1, col2, col3 = st.columns(3)
                             with col1:
                                 friday_close = st.number_input("周五收盘价", min_value=0.0, key="friday_close_input")
                                 if st.button("记录周五收盘", key="record_friday"):
@@ -2273,14 +2364,13 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                         record = fe_tracking[symbol_to_update]
                                         record['friday_close'] = friday_close
                                         
+                                        # 更新偏离度
                                         cw = record.get('call_wall', 0)
                                         pw = record.get('put_wall', 0)
-                                        if friday_close > cw:
-                                            record['friday_position'] = 'above_cw'
-                                        elif friday_close < pw:
-                                            record['friday_position'] = 'below_pw'
-                                        else:
-                                            record['friday_position'] = 'in_range'
+                                        if cw > 0:
+                                            record['dist_to_cw'] = (friday_close - cw) / friday_close * 100
+                                        if pw > 0:
+                                            record['dist_to_pw'] = (friday_close - pw) / friday_close * 100
                                         
                                         save_worksheet_data("Friday_Expiry", fe_tracking)
                                         st.success(f"✅ 已记录{symbol_to_update}周五收盘: ${friday_close}")
@@ -2293,22 +2383,51 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                         record['monday_open'] = monday_open
                                         
                                         friday_close_val = record.get('friday_close')
-                                        if friday_close_val:
+                                        if friday_close_val and friday_close_val > 0:
                                             gap_pct = ((monday_open - friday_close_val) / friday_close_val) * 100
-                                            record['monday_gap_pct'] = gap_pct
+                                            record['gap_pct'] = gap_pct
                                             
-                                            pred_type = record.get('pred_type', 'neutral')
-                                            if pred_type in ['bullish', 'strong_bullish'] and gap_pct > 0:
-                                                record['gap_direction_correct'] = True
-                                            elif pred_type in ['bearish', 'strong_bearish'] and gap_pct < 0:
-                                                record['gap_direction_correct'] = True
-                                            elif pred_type == 'neutral':
-                                                record['gap_direction_correct'] = None
+                                            # 跳空方向验证
+                                            sig_type = record.get('signal_type', 'neutral')
+                                            if sig_type in ['bullish', 'strong_bullish', 'bullish_watch'] and gap_pct > 0:
+                                                record['gap_correct'] = True
+                                            elif sig_type in ['bearish', 'strong_bearish', 'bearish_watch'] and gap_pct < 0:
+                                                record['gap_correct'] = True
+                                            elif 'neutral' in sig_type or 'weak' in sig_type:
+                                                record['gap_correct'] = None
                                             else:
-                                                record['gap_direction_correct'] = False
+                                                record['gap_correct'] = False
                                         
                                         save_worksheet_data("Friday_Expiry", fe_tracking)
-                                        st.success(f"✅ 已记录{symbol_to_update}周一开盘: ${monday_open}")
+                                        st.success(f"✅ 已记录{symbol_to_update}周一开盘: ${monday_open}，跳空{gap_pct:+.2f}%")
+                            
+                            with col3:
+                                tuesday_close = st.number_input("周二收盘价", min_value=0.0, key="tuesday_close_input")
+                                if st.button("记录周二收盘", key="record_tuesday"):
+                                    if symbol_to_update and tuesday_close > 0:
+                                        record = fe_tracking[symbol_to_update]
+                                        record['tuesday_close'] = tuesday_close
+                                        
+                                        friday_close_val = record.get('friday_close')
+                                        if friday_close_val and friday_close_val > 0:
+                                            trend_pct = ((tuesday_close - friday_close_val) / friday_close_val) * 100
+                                            record['trend_pct'] = trend_pct
+                                            
+                                            # 趋势方向验证
+                                            sig_type = record.get('signal_type', 'neutral')
+                                            if sig_type in ['bullish', 'strong_bullish', 'bullish_watch'] and trend_pct > 0:
+                                                record['trend_correct'] = True
+                                            elif sig_type in ['bearish', 'strong_bearish', 'bearish_watch'] and trend_pct < 0:
+                                                record['trend_correct'] = True
+                                            elif 'neutral' in sig_type or 'weak' in sig_type:
+                                                record['trend_correct'] = None
+                                            else:
+                                                record['trend_correct'] = False
+                                            
+                                            record['status'] = 'completed'
+                                        
+                                        save_worksheet_data("Friday_Expiry", fe_tracking)
+                                        st.success(f"✅ 已记录{symbol_to_update}周二收盘: ${tuesday_close}")
                 
             except Exception as e:
                 st.error(f"❌ 读取失败: {e}")
