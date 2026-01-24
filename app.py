@@ -1921,27 +1921,38 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                 zg = qqq.get('zero_gamma')
                 vt = qqq.get('vol_trigger')
                 
+                # 格式化数值
+                zg_str = f"{zg:.0f}" if zg else 'N/A'
+                pw_str = f"{pw:.0f}" if pw else 'N/A'
+                cw_str = f"{cw:.0f}" if cw else 'N/A'
+                vt_str = f"{vt:.0f}" if vt else 'N/A'
+                
                 advice = f"""
                 **正Gamma环境 - 均值回归策略**
                 
                 🎯 **做多区域**: 
-                - Zero Gamma ({zg:.0f if zg else 'N/A'}) 附近是最佳做多位置
-                - Put Wall ({pw:.0f if pw else 'N/A'}) 是强支撑，可加仓
+                - Zero Gamma ({zg_str}) 附近是最佳做多位置
+                - Put Wall ({pw_str}) 是强支撑，可加仓
                 
                 🎯 **减仓/做空区域**:
-                - Call Wall ({cw:.0f if cw else 'N/A'}) 附近减仓或轻仓做空
+                - Call Wall ({cw_str}) 附近减仓或轻仓做空
                 - 不追Call Wall突破！正Gamma会压制涨幅
                 
                 ⚠️ **风险控制**:
                 - 止损设在Zero Gamma下方2-3点
                 - 如果跌破Zero Gamma，观望等待企稳
-                - 如果价格跌破Volatility Trigger ({vt:.0f if vt else 'N/A'})，环境可能转为负Gamma
+                - 如果价格跌破Volatility Trigger ({vt_str})，环境可能转为负Gamma
                 """
                 st.success(advice)
             elif gamma_env_type == 'negative':
                 cw = qqq.get('call_wall')
                 pw = qqq.get('put_wall')
                 zg = qqq.get('zero_gamma')
+                
+                # 格式化数值
+                zg_str = f"{zg:.0f}" if zg else 'N/A'
+                pw_str = f"{pw:.0f}" if pw else 'N/A'
+                cw_str = f"{cw:.0f}" if cw else 'N/A'
                 
                 advice = f"""
                 **负Gamma环境 - 趋势跟随策略**
@@ -1953,13 +1964,13 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                 
                 🎯 **操作建议**:
                 - 顺势操作，不抄底不摸顶
-                - 突破Call Wall ({cw:.0f if cw else 'N/A'}) 可追多
-                - 跌破Put Wall ({pw:.0f if pw else 'N/A'}) 可追空
+                - 突破Call Wall ({cw_str}) 可追多
+                - 跌破Put Wall ({pw_str}) 可追空
                 
                 ⚠️ **风险控制**:
                 - 严格止损，波动可能很大
                 - 减小仓位，负Gamma环境风险高
-                - Zero Gamma ({zg:.0f if zg else 'N/A'}) 是关键分界线
+                - Zero Gamma ({zg_str}) 是关键分界线
                 """
                 st.error(advice)
             
