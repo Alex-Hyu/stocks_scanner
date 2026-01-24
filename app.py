@@ -2305,13 +2305,15 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                         gap_accuracy = (gap_correct / gap_verified * 100) if gap_verified > 0 else 0
                         trend_accuracy = (trend_correct / trend_verified * 100) if trend_verified > 0 else 0
                         
-                        col1, col2 = st.columns(2)
-                        with col1:
+                        stat_col1, stat_col2, stat_col3 = st.columns(3)
+                        with stat_col1:
                             if gap_verified > 0:
                                 st.metric("跳空准确率", f"{gap_accuracy:.1f}%", f"{gap_correct}/{gap_verified} 正确")
-                        with col2:
+                        with stat_col2:
                             if trend_verified > 0:
                                 st.metric("趋势准确率", f"{trend_accuracy:.1f}%", f"{trend_correct}/{trend_verified} 正确")
+                        with stat_col3:
+                            st.metric("追踪标的", len(fe_tracking))
                         
                         # 追踪表格
                         tracking_rows = []
@@ -2335,59 +2337,216 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                             
                             tracking_rows.append({
                                 '标的': symbol,
-                                '周五收盘': f"${record.get('friday_close', 0):.2f}" if record.get('friday_close') else "待填",
+                                '周五收盘': f"${record.get('friday_close', 0):.2f}" if record.get('friday_close') else "⏳",
                                 'NEG': f"{record.get('neg', 0):.1f}%",
-                                '距CW%': f"{record.get('dist_to_cw', 0):+.2f}%" if record.get('dist_to_cw') else "-",
-                                '距PW%': f"{record.get('dist_to_pw', 0):+.2f}%" if record.get('dist_to_pw') else "-",
-                                '预测': f"{sig_icon} {str(record.get('prediction', ''))[:20]}",
-                                '周一开盘': f"${record.get('monday_open', 0):.2f}" if record.get('monday_open') else "待填",
-                                '跳空%': f"{record.get('gap_pct', 0):+.2f}%" if record.get('gap_pct') else "-",
-                                '跳空验证': gap_status,
-                                '趋势验证': trend_status
+                                '距CW%': f"{record.get('dist_to_cw', 0):+.2f}%" if record.get('dist_to_cw') is not None else "-",
+                                '距PW%': f"{record.get('dist_to_pw', 0):+.2f}%" if record.get('dist_to_pw') is not None else "-",
+                                '预测': f"{sig_icon} {str(record.get('prediction', ''))[:18]}",
+                                '周一开盘': f"${record.get('monday_open', 0):.2f}" if record.get('monday_open') else "⏳",
+                                '跳空%': f"{record.get('gap_pct', 0):+.2f}%" if record.get('gap_pct') is not None else "-",
+                                '周二收盘': f"${record.get('tuesday_close', 0):.2f}" if record.get('tuesday_close') else "⏳",
+                                '趋势%': f"{record.get('trend_pct', 0):+.2f}%" if record.get('trend_pct') is not None else "-",
+                                '跳空': gap_status,
+                                '趋势': trend_status
                             })
                         
                         st.dataframe(pd.DataFrame(tracking_rows), use_container_width=True, hide_index=True)
                         
-                        # 记录价格输入
-                        with st.expander("📝 记录周五收盘/周一开盘/周二收盘"):
-                            symbol_to_update = st.selectbox(
-                                "选择标的",
-                                options=list(fe_tracking.keys()),
-                                key="fe_symbol_update"
-                            )
-                            
-                            col1, col2, col3 = st.columns(3)
-                            with col1:
-                                friday_close = st.number_input("周五收盘价", min_value=0.0, key="friday_close_input")
-                                if st.button("记录周五收盘", key="record_friday"):
-                                    if symbol_to_update and friday_close > 0:
-                                        record = fe_tracking[symbol_to_update]
-                                        record['friday_close'] = friday_close
+                        # 自动获取价格按钮
+                        st.subheader("📊 自动获取历史价格")
+                        st.caption("从Yahoo Finance自动获取周五收盘、周一开盘、周二收盘价格")
+                        
+                        btn_col1, btn_col2, btn_col3 = st.columns(3)
+                        
+                        with btn_col1:
+                            if st.button("📅 获取周五收盘价", key="fetch_friday_close"):
+                                updated = 0
+                                failed = []
+                                with st.spinner("正在获取周五收盘价..."):
+                                    for symbol, record in fe_tracking.items():
+                                        if record.get('friday_close'):
+                                            continue  # 已有数据跳过
+                                        try:
+                                            ticker = yf.Ticker(symbol)
+                                            # 获取最近5天数据找周五
+                                            hist = ticker.history(period="5d")
+                                            if not hist.empty:
+                                                # 找最近的周五（weekday=4）
+                                                for idx in range(len(hist)-1, -1, -1):
+                                                    date = hist.index[idx]
+                                                    if date.weekday() == 4:  # 周五
+                                                        friday_close = hist.iloc[idx]['Close']
+                                                        record['friday_close'] = float(friday_close)
+                                                        
+                                                        # 更新偏离度
+                                                        cw = record.get('call_wall', 0)
+                                                        pw = record.get('put_wall', 0)
+                                                        if cw and cw > 0:
+                                                            record['dist_to_cw'] = (friday_close - cw) / friday_close * 100
+                                                        if pw and pw > 0:
+                                                            record['dist_to_pw'] = (friday_close - pw) / friday_close * 100
+                                                        
+                                                        updated += 1
+                                                        break
+                                        except Exception as e:
+                                            failed.append(f"{symbol}: {str(e)[:30]}")
+                                
+                                save_worksheet_data("Friday_Expiry", fe_tracking)
+                                st.success(f"✅ 更新了{updated}个标的周五收盘价")
+                                if failed:
+                                    st.warning(f"⚠️ 失败: {', '.join(failed[:5])}")
+                        
+                        with btn_col2:
+                            if st.button("📅 获取周一开盘价", key="fetch_monday_open"):
+                                updated = 0
+                                failed = []
+                                with st.spinner("正在获取周一开盘价..."):
+                                    for symbol, record in fe_tracking.items():
+                                        if record.get('monday_open'):
+                                            continue
+                                        if not record.get('friday_close'):
+                                            continue  # 需要先有周五收盘
+                                        try:
+                                            ticker = yf.Ticker(symbol)
+                                            hist = ticker.history(period="5d")
+                                            if not hist.empty:
+                                                # 找最近的周一（weekday=0）
+                                                for idx in range(len(hist)-1, -1, -1):
+                                                    date = hist.index[idx]
+                                                    if date.weekday() == 0:  # 周一
+                                                        monday_open = hist.iloc[idx]['Open']
+                                                        record['monday_open'] = float(monday_open)
+                                                        
+                                                        # 计算跳空
+                                                        friday_close = record.get('friday_close', 0)
+                                                        if friday_close > 0:
+                                                            gap_pct = ((monday_open - friday_close) / friday_close) * 100
+                                                            record['gap_pct'] = gap_pct
+                                                            
+                                                            # 验证跳空方向
+                                                            sig_type = record.get('signal_type', 'neutral')
+                                                            if sig_type in ['bullish', 'strong_bullish', 'bullish_watch'] and gap_pct > 0:
+                                                                record['gap_correct'] = True
+                                                            elif sig_type in ['bearish', 'strong_bearish', 'bearish_watch'] and gap_pct < 0:
+                                                                record['gap_correct'] = True
+                                                            elif 'neutral' in sig_type or 'weak' in sig_type:
+                                                                record['gap_correct'] = None
+                                                            else:
+                                                                record['gap_correct'] = False
+                                                        
+                                                        updated += 1
+                                                        break
+                                        except Exception as e:
+                                            failed.append(f"{symbol}: {str(e)[:30]}")
+                                
+                                save_worksheet_data("Friday_Expiry", fe_tracking)
+                                st.success(f"✅ 更新了{updated}个标的周一开盘价")
+                                if failed:
+                                    st.warning(f"⚠️ 失败: {', '.join(failed[:5])}")
+                        
+                        with btn_col3:
+                            if st.button("📅 获取周二收盘价", key="fetch_tuesday_close"):
+                                updated = 0
+                                failed = []
+                                with st.spinner("正在获取周二收盘价..."):
+                                    for symbol, record in fe_tracking.items():
+                                        if record.get('tuesday_close'):
+                                            continue
+                                        if not record.get('friday_close'):
+                                            continue
+                                        try:
+                                            ticker = yf.Ticker(symbol)
+                                            hist = ticker.history(period="5d")
+                                            if not hist.empty:
+                                                # 找最近的周二（weekday=1）
+                                                for idx in range(len(hist)-1, -1, -1):
+                                                    date = hist.index[idx]
+                                                    if date.weekday() == 1:  # 周二
+                                                        tuesday_close = hist.iloc[idx]['Close']
+                                                        record['tuesday_close'] = float(tuesday_close)
+                                                        
+                                                        # 计算趋势
+                                                        friday_close = record.get('friday_close', 0)
+                                                        if friday_close > 0:
+                                                            trend_pct = ((tuesday_close - friday_close) / friday_close) * 100
+                                                            record['trend_pct'] = trend_pct
+                                                            
+                                                            # 验证趋势方向
+                                                            sig_type = record.get('signal_type', 'neutral')
+                                                            if sig_type in ['bullish', 'strong_bullish', 'bullish_watch'] and trend_pct > 0:
+                                                                record['trend_correct'] = True
+                                                            elif sig_type in ['bearish', 'strong_bearish', 'bearish_watch'] and trend_pct < 0:
+                                                                record['trend_correct'] = True
+                                                            elif 'neutral' in sig_type or 'weak' in sig_type:
+                                                                record['trend_correct'] = None
+                                                            else:
+                                                                record['trend_correct'] = False
+                                                            
+                                                            record['status'] = 'completed'
+                                                        
+                                                        updated += 1
+                                                        break
+                                        except Exception as e:
+                                            failed.append(f"{symbol}: {str(e)[:30]}")
+                                
+                                save_worksheet_data("Friday_Expiry", fe_tracking)
+                                st.success(f"✅ 更新了{updated}个标的周二收盘价")
+                                if failed:
+                                    st.warning(f"⚠️ 失败: {', '.join(failed[:5])}")
+                        
+                        # 一键获取所有价格
+                        st.divider()
+                        if st.button("🔄 一键获取所有价格", key="fetch_all_prices"):
+                            total_updated = 0
+                            with st.spinner("正在获取所有历史价格..."):
+                                for symbol, record in fe_tracking.items():
+                                    try:
+                                        ticker = yf.Ticker(symbol)
+                                        hist = ticker.history(period="10d")
+                                        if hist.empty:
+                                            continue
                                         
-                                        # 更新偏离度
-                                        cw = record.get('call_wall', 0)
-                                        pw = record.get('put_wall', 0)
-                                        if cw > 0:
-                                            record['dist_to_cw'] = (friday_close - cw) / friday_close * 100
-                                        if pw > 0:
-                                            record['dist_to_pw'] = (friday_close - pw) / friday_close * 100
+                                        # 按日期排序
+                                        hist = hist.sort_index()
                                         
-                                        save_worksheet_data("Friday_Expiry", fe_tracking)
-                                        st.success(f"✅ 已记录{symbol_to_update}周五收盘: ${friday_close}")
-                            
-                            with col2:
-                                monday_open = st.number_input("周一开盘价", min_value=0.0, key="monday_open_input")
-                                if st.button("记录周一开盘", key="record_monday"):
-                                    if symbol_to_update and monday_open > 0:
-                                        record = fe_tracking[symbol_to_update]
-                                        record['monday_open'] = monday_open
+                                        # 查找周五、周一、周二
+                                        friday_data = None
+                                        monday_data = None
+                                        tuesday_data = None
                                         
-                                        friday_close_val = record.get('friday_close')
-                                        if friday_close_val and friday_close_val > 0:
-                                            gap_pct = ((monday_open - friday_close_val) / friday_close_val) * 100
+                                        for idx in range(len(hist)):
+                                            date = hist.index[idx]
+                                            weekday = date.weekday()
+                                            
+                                            if weekday == 4:  # 周五
+                                                friday_data = hist.iloc[idx]
+                                            elif weekday == 0 and friday_data is not None:  # 周一（周五后的）
+                                                monday_data = hist.iloc[idx]
+                                            elif weekday == 1 and monday_data is not None:  # 周二（周一后的）
+                                                tuesday_data = hist.iloc[idx]
+                                        
+                                        updated_this = False
+                                        
+                                        # 填入周五收盘
+                                        if friday_data is not None and not record.get('friday_close'):
+                                            friday_close = float(friday_data['Close'])
+                                            record['friday_close'] = friday_close
+                                            cw = record.get('call_wall', 0)
+                                            pw = record.get('put_wall', 0)
+                                            if cw and cw > 0:
+                                                record['dist_to_cw'] = (friday_close - cw) / friday_close * 100
+                                            if pw and pw > 0:
+                                                record['dist_to_pw'] = (friday_close - pw) / friday_close * 100
+                                            updated_this = True
+                                        
+                                        # 填入周一开盘
+                                        if monday_data is not None and not record.get('monday_open') and record.get('friday_close'):
+                                            monday_open = float(monday_data['Open'])
+                                            record['monday_open'] = monday_open
+                                            friday_close = record['friday_close']
+                                            gap_pct = ((monday_open - friday_close) / friday_close) * 100
                                             record['gap_pct'] = gap_pct
                                             
-                                            # 跳空方向验证
                                             sig_type = record.get('signal_type', 'neutral')
                                             if sig_type in ['bullish', 'strong_bullish', 'bullish_watch'] and gap_pct > 0:
                                                 record['gap_correct'] = True
@@ -2397,23 +2556,16 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                                 record['gap_correct'] = None
                                             else:
                                                 record['gap_correct'] = False
+                                            updated_this = True
                                         
-                                        save_worksheet_data("Friday_Expiry", fe_tracking)
-                                        st.success(f"✅ 已记录{symbol_to_update}周一开盘: ${monday_open}，跳空{gap_pct:+.2f}%")
-                            
-                            with col3:
-                                tuesday_close = st.number_input("周二收盘价", min_value=0.0, key="tuesday_close_input")
-                                if st.button("记录周二收盘", key="record_tuesday"):
-                                    if symbol_to_update and tuesday_close > 0:
-                                        record = fe_tracking[symbol_to_update]
-                                        record['tuesday_close'] = tuesday_close
-                                        
-                                        friday_close_val = record.get('friday_close')
-                                        if friday_close_val and friday_close_val > 0:
-                                            trend_pct = ((tuesday_close - friday_close_val) / friday_close_val) * 100
+                                        # 填入周二收盘
+                                        if tuesday_data is not None and not record.get('tuesday_close') and record.get('friday_close'):
+                                            tuesday_close = float(tuesday_data['Close'])
+                                            record['tuesday_close'] = tuesday_close
+                                            friday_close = record['friday_close']
+                                            trend_pct = ((tuesday_close - friday_close) / friday_close) * 100
                                             record['trend_pct'] = trend_pct
                                             
-                                            # 趋势方向验证
                                             sig_type = record.get('signal_type', 'neutral')
                                             if sig_type in ['bullish', 'strong_bullish', 'bullish_watch'] and trend_pct > 0:
                                                 record['trend_correct'] = True
@@ -2423,11 +2575,18 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                                 record['trend_correct'] = None
                                             else:
                                                 record['trend_correct'] = False
-                                            
                                             record['status'] = 'completed'
+                                            updated_this = True
                                         
-                                        save_worksheet_data("Friday_Expiry", fe_tracking)
-                                        st.success(f"✅ 已记录{symbol_to_update}周二收盘: ${tuesday_close}")
+                                        if updated_this:
+                                            total_updated += 1
+                                    
+                                    except Exception as e:
+                                        continue
+                            
+                            save_worksheet_data("Friday_Expiry", fe_tracking)
+                            st.success(f"✅ 更新了{total_updated}个标的的价格数据")
+                            st.rerun()
                 
             except Exception as e:
                 st.error(f"❌ 读取失败: {e}")
