@@ -524,13 +524,13 @@ def add_new_tracking(symbol, row, signal_type, today_str):
     try:
         if isinstance(top_gamma_exp, str) and top_gamma_exp:
             exp_date = datetime.strptime(top_gamma_exp, '%Y-%m-%d')
-            # 到期日+5个交易日（约7个自然日）
-            track_end = (exp_date + timedelta(days=7)).strftime('%Y-%m-%d')
+            # 到期日+2个交易日（约4个自然日）
+            track_end = (exp_date + timedelta(days=4)).strftime('%Y-%m-%d')
         else:
-            # 默认10天后结束追踪
-            track_end = (datetime.now() + timedelta(days=10)).strftime('%Y-%m-%d')
+            # 默认7天后结束追踪
+            track_end = (datetime.now() + timedelta(days=7)).strftime('%Y-%m-%d')
     except:
-        track_end = (datetime.now() + timedelta(days=10)).strftime('%Y-%m-%d')
+        track_end = (datetime.now() + timedelta(days=7)).strftime('%Y-%m-%d')
     
     # 判断信号方向 - 使用Signal_Type字段
     sig_type = row.get('Signal_Type', '')
@@ -547,7 +547,7 @@ def add_new_tracking(symbol, row, signal_type, today_str):
         'top_gamma_exp': str(top_gamma_exp) if top_gamma_exp else '',
         'track_end_date': track_end,
         'signal_type': signal_type,
-        'signal_direction': signal_direction,  # 新增：信号方向
+        'signal_direction': signal_direction,
         'vol_regime': row.get('Vol_Regime', '未知'),
         'delta_ratio': float(row.get('Delta Ratio', 0)),
         'gamma_ratio': float(row.get('Gamma Ratio', 0)),
@@ -557,14 +557,15 @@ def add_new_tracking(symbol, row, signal_type, today_str):
         'put_wall': float(row.get('Put Wall', 0)),
         'call_wall': float(row.get('Call Wall', 0)),
         'hedge_wall': float(row.get('Hedge Wall', 0)) if pd.notna(row.get('Hedge Wall')) else 0,
+        'cw_increase': row.get('CW_Increase', False),
         'daily_prices': {today_str: float(row['Current Price'])},
         'current_return': 0,
         'max_gain': 0,
         'max_drawdown': 0,
         'squeeze_confirmed': False,
-        'direction_correct': None,  # 新增：方向是否正确
+        'direction_correct': None,
         'status': 'tracking',
-        'is_new': True  # 标记为新增
+        'is_new': True
     }
 
 def calculate_tracking_stats(tracking_data):
@@ -1206,13 +1207,15 @@ def parse_qqq_premarket_text(text):
     
     return result
 
-def analyze_qqq_nq(premarket_data):
-    """分析QQQ/NQ数据"""
+def analyze_qqq_nq(premarket_data, csv_data=None):
+    """分析QQQ/NQ数据，包含方向性分析和情景分析"""
     analysis = {
         'qqq': {},
         'nq': {},
         'cross_validation': {},
-        'prediction': {}
+        'prediction': {},
+        'directional': {},
+        'scenarios': []
     }
     
     for market in ['qqq', 'nq']:
@@ -1313,6 +1316,185 @@ def analyze_qqq_nq(premarket_data):
             analysis['prediction']['close_range'] = f"{close_low:.2f} - {close_high:.2f}"
             analysis['prediction']['close_target'] = zg
     
+    # ===== CSV数据的方向性分析 =====
+    if csv_data is not None:
+        directional = []
+        
+        # Delta Ratio分析
+        dr = csv_data.get('Delta Ratio')
+        if dr is not None:
+            dr_val = parse_number_safe(str(dr).replace("'", "-"))
+            if dr_val is not None:
+                if dr_val > -1:
+                    directional.append(f"• Delta Ratio {dr_val:.2f} > -1: **Call Delta主导，偏多** 📈")
+                    analysis['directional']['delta_ratio'] = ('bullish', dr_val)
+                elif dr_val < -2:
+                    directional.append(f"• Delta Ratio {dr_val:.2f} < -2: **Put Delta主导，偏空** 📉")
+                    analysis['directional']['delta_ratio'] = ('bearish', dr_val)
+                else:
+                    directional.append(f"• Delta Ratio {dr_val:.2f}: 中性")
+                    analysis['directional']['delta_ratio'] = ('neutral', dr_val)
+        
+        # Gamma Ratio分析
+        gr = csv_data.get('Gamma Ratio')
+        if gr is not None:
+            gr_val = parse_number_safe(str(gr))
+            if gr_val is not None:
+                if gr_val < 1:
+                    directional.append(f"• Gamma Ratio {gr_val:.2f} < 1: **Call Gamma主导，上涨加速** 📈")
+                    analysis['directional']['gamma_ratio'] = ('bullish', gr_val)
+                elif gr_val > 1.5:
+                    directional.append(f"• Gamma Ratio {gr_val:.2f} > 1.5: **Put Gamma主导，下跌加速** 📉")
+                    analysis['directional']['gamma_ratio'] = ('bearish', gr_val)
+                else:
+                    directional.append(f"• Gamma Ratio {gr_val:.2f}: 均衡")
+                    analysis['directional']['gamma_ratio'] = ('neutral', gr_val)
+        
+        # Volume Ratio分析
+        vr = csv_data.get('Volume Ratio')
+        if vr is not None:
+            vr_val = parse_number_safe(str(vr))
+            if vr_val is not None:
+                if vr_val < 0.7:
+                    directional.append(f"• Volume Ratio {vr_val:.2f} < 0.7: **Call交易活跃，偏多** 📈")
+                    analysis['directional']['volume_ratio'] = ('bullish', vr_val)
+                elif vr_val > 1.3:
+                    directional.append(f"• Volume Ratio {vr_val:.2f} > 1.3: **Put交易活跃，偏空** 📉")
+                    analysis['directional']['volume_ratio'] = ('bearish', vr_val)
+                else:
+                    directional.append(f"• Volume Ratio {vr_val:.2f}: 均衡")
+                    analysis['directional']['volume_ratio'] = ('neutral', vr_val)
+        
+        # Hedge Wall分析
+        hw = csv_data.get('Hedge Wall')
+        current_price = qqq.get('current') or csv_data.get('Current Price')
+        if hw is not None and current_price:
+            hw_val = parse_number_safe(str(hw))
+            price_val = parse_number_safe(str(current_price))
+            if hw_val and price_val:
+                if price_val > hw_val:
+                    directional.append(f"• 价格 > Hedge Wall ({hw_val:.0f}): **均值回归模式**")
+                    analysis['directional']['hedge_wall'] = ('mean_reversion', hw_val)
+                else:
+                    directional.append(f"• 价格 < Hedge Wall ({hw_val:.0f}): **趋势/高波动模式**")
+                    analysis['directional']['hedge_wall'] = ('trending', hw_val)
+        
+        # NEG分析
+        neg = csv_data.get('Next Exp Gamma')
+        if neg is not None:
+            neg_val = parse_number_safe(str(neg).replace('%', ''))
+            if neg_val is not None:
+                if neg_val < 1:
+                    neg_val = neg_val * 100
+                if neg_val > 40:
+                    directional.append(f"• Next Exp Gamma {neg_val:.1f}%: **极高集中，剧烈波动风险** ⚠️")
+                elif neg_val > 25:
+                    directional.append(f"• Next Exp Gamma {neg_val:.1f}%: **较高集中，注意到期波动**")
+                else:
+                    directional.append(f"• Next Exp Gamma {neg_val:.1f}%: 正常分布")
+                analysis['directional']['neg'] = neg_val
+        
+        # IV vs RV分析
+        iv = csv_data.get('30 Day IV')
+        rv = csv_data.get('Realized Vol')
+        if iv is not None and rv is not None:
+            iv_val = parse_number_safe(str(iv).replace('%', ''))
+            rv_val = parse_number_safe(str(rv).replace('%', ''))
+            if iv_val and rv_val:
+                if iv_val < 1:
+                    iv_val = iv_val * 100
+                if rv_val < 1:
+                    rv_val = rv_val * 100
+                if iv_val > rv_val * 1.2:
+                    directional.append(f"• IV {iv_val:.1f}% > RV {rv_val:.1f}%: **期权偏贵，卖方有利**")
+                elif iv_val < rv_val * 0.8:
+                    directional.append(f"• IV {iv_val:.1f}% < RV {rv_val:.1f}%: **期权偏便宜，买方有利**")
+                else:
+                    directional.append(f"• IV {iv_val:.1f}% ≈ RV {rv_val:.1f}%: 期权定价合理")
+                analysis['directional']['iv_rv'] = (iv_val, rv_val)
+        
+        # DPI分析
+        dpi = csv_data.get('DPI')
+        dpi_5d = csv_data.get('5Day DPI')
+        if dpi is not None:
+            dpi_val = parse_number_safe(str(dpi).replace('%', ''))
+            if dpi_val:
+                if dpi_val < 1:
+                    dpi_val = dpi_val * 100
+                if dpi_val > 52:
+                    directional.append(f"• DPI {dpi_val:.1f}%: **机构强力买入** 🏦📈")
+                elif dpi_val > 48:
+                    directional.append(f"• DPI {dpi_val:.1f}%: 机构积极买入 🏦")
+                elif dpi_val < 45:
+                    directional.append(f"• DPI {dpi_val:.1f}%: **机构买盘减弱** ⚠️")
+                else:
+                    directional.append(f"• DPI {dpi_val:.1f}%: 机构中性")
+                analysis['directional']['dpi'] = dpi_val
+        
+        if dpi_5d is not None:
+            dpi_5d_val = parse_number_safe(str(dpi_5d).replace('%', ''))
+            if dpi_5d_val:
+                if dpi_5d_val < 1:
+                    dpi_5d_val = dpi_5d_val * 100
+                directional.append(f"• 5Day DPI {dpi_5d_val:.1f}%")
+                analysis['directional']['dpi_5d'] = dpi_5d_val
+        
+        analysis['directional']['items'] = directional
+        
+        # ===== 情景分析 =====
+        scenarios = []
+        
+        # 获取关键位
+        cw = qqq.get('call_wall') or parse_number_safe(str(csv_data.get('Call Wall', 0)))
+        pw = qqq.get('put_wall') or parse_number_safe(str(csv_data.get('Put Wall', 0)))
+        zg = qqq.get('zero_gamma')
+        current = qqq.get('current') or parse_number_safe(str(csv_data.get('Current Price', 0)))
+        
+        gamma_env = analysis['qqq'].get('gamma_env_type', 'positive')
+        
+        if gamma_env == 'positive':
+            # 正Gamma环境
+            scenarios.append({
+                'name': '区间震荡',
+                'probability': 55,
+                'description': f"在 {zg:.0f}-{cw:.0f} 区间震荡" if zg and cw else "在Zero Gamma和Call Wall之间震荡",
+                'strategy': "支撑做多，阻力获利；高抛低吸"
+            })
+            scenarios.append({
+                'name': '冲高回落',
+                'probability': 30,
+                'description': f"冲击 {cw:.0f} Call Wall 后回落" if cw else "冲击Call Wall后回落",
+                'strategy': "不追Call Wall突破；CW附近减仓或做空"
+            })
+            scenarios.append({
+                'name': '下探反弹',
+                'probability': 15,
+                'description': f"下探 {zg:.0f} Zero Gamma 后反弹" if zg else "下探Zero Gamma后反弹",
+                'strategy': "Zero Gamma是做多机会；设止损于ZG下方"
+            })
+        else:
+            # 负Gamma环境
+            scenarios.append({
+                'name': '趋势延续',
+                'probability': 50,
+                'description': "负Gamma放大波动，趋势可能延续",
+                'strategy': "顺势操作，严格止损；不抄底不摸顶"
+            })
+            scenarios.append({
+                'name': '剧烈震荡',
+                'probability': 30,
+                'description': "在关键位之间大幅震荡",
+                'strategy': "减小仓位；等待方向明确"
+            })
+            scenarios.append({
+                'name': 'V型反转',
+                'probability': 20,
+                'description': f"触及{pw:.0f} Put Wall后V型反转" if pw else "触及Put Wall后V型反转",
+                'strategy': "Put Wall是潜在反转点；需确认信号"
+            })
+        
+        analysis['scenarios'] = scenarios
+    
     return analysis
 
 # ============================================================
@@ -1347,31 +1529,121 @@ def parse_number_safe(value):
 def calculate_gamma_direction(call_gamma, put_gamma):
     """
     计算Gamma Direction（到期方向指标）
-    
-    = |Put Gamma| / (|Put Gamma| + |Call Gamma|)
-    > 0.6 = Put主导到期 → 高开倾向
-    < 0.4 = Call主导到期 → 低开倾向
+    使用Call/Put Gamma绝对值比较
     """
     call_g = parse_number_safe(call_gamma)
     put_g = parse_number_safe(put_gamma)
     
     if call_g is None or put_g is None:
-        return 0.5, "数据缺失", "unknown"
+        return None, None, "unknown"
     
     call_g = abs(call_g)
     put_g = abs(put_g)
     
     if call_g + put_g == 0:
-        return 0.5, "均衡", "neutral"
+        return None, None, "unknown"
     
-    direction = put_g / (put_g + call_g)
+    # Put Gamma占比
+    put_ratio = put_g / (put_g + call_g)
     
-    if direction > 0.6:
-        return direction, "Put主导到期", "put_dominant"
-    elif direction < 0.4:
-        return direction, "Call主导到期", "call_dominant"
+    if put_ratio > 0.6:
+        return put_ratio, put_g, "put_dominant"
+    elif put_ratio < 0.4:
+        return put_ratio, call_g, "call_dominant"
     else:
-        return direction, "均衡", "neutral"
+        return put_ratio, max(call_g, put_g), "neutral"
+
+def analyze_expiry_direction(row):
+    """
+    分析到期方向，综合Gamma和Volume判断
+    
+    逻辑：
+    - Put Gamma大 + Put Volume大 → 到期后MM买入平仓 → 高开倾向
+    - Call Gamma大 + Call Volume大 → 到期后MM卖出平仓 → 低开倾向
+    """
+    call_gamma = parse_number_safe(row.get('Call Gamma'))
+    put_gamma = parse_number_safe(row.get('Put Gamma'))
+    call_vol = parse_number_safe(row.get('Next Expir Call Volume'))
+    put_vol = parse_number_safe(row.get('Next Expir Put Volume'))
+    
+    # Gamma判断
+    gamma_signal = "neutral"
+    gamma_detail = ""
+    
+    if call_gamma is not None and put_gamma is not None:
+        call_g = abs(call_gamma)
+        put_g = abs(put_gamma)
+        
+        if call_g + put_g > 0:
+            put_ratio = put_g / (call_g + put_g)
+            
+            if put_ratio > 0.6:
+                gamma_signal = "put_dominant"
+                gamma_detail = f"Put Gamma主导 ({put_ratio*100:.0f}%)"
+            elif put_ratio < 0.4:
+                gamma_signal = "call_dominant"
+                gamma_detail = f"Call Gamma主导 ({(1-put_ratio)*100:.0f}%)"
+            else:
+                gamma_signal = "neutral"
+                gamma_detail = f"Gamma均衡 (Put {put_ratio*100:.0f}%)"
+    
+    # Volume判断
+    vol_signal = "neutral"
+    vol_detail = ""
+    
+    if call_vol is not None and put_vol is not None:
+        if call_vol + put_vol > 0:
+            put_vol_ratio = put_vol / (call_vol + put_vol)
+            
+            if put_vol_ratio > 0.55:
+                vol_signal = "put_dominant"
+                vol_detail = f"Put成交活跃 ({put_vol_ratio*100:.0f}%)"
+            elif put_vol_ratio < 0.45:
+                vol_signal = "call_dominant"
+                vol_detail = f"Call成交活跃 ({(1-put_vol_ratio)*100:.0f}%)"
+            else:
+                vol_signal = "neutral"
+                vol_detail = f"成交均衡"
+    
+    # 综合判断
+    if gamma_signal == "put_dominant" and vol_signal == "put_dominant":
+        direction = "strong_bullish"
+        prediction = "🚀 强势高开"
+        logic = f"{gamma_detail} + {vol_detail} → MM大量Put到期需买入平仓"
+    elif gamma_signal == "call_dominant" and vol_signal == "call_dominant":
+        direction = "strong_bearish"
+        prediction = "💀 强势低开"
+        logic = f"{gamma_detail} + {vol_detail} → MM大量Call到期需卖出平仓"
+    elif gamma_signal == "put_dominant":
+        direction = "bullish"
+        prediction = "📈 偏高开"
+        logic = f"{gamma_detail} → Put到期MM买入平仓倾向"
+    elif gamma_signal == "call_dominant":
+        direction = "bearish"
+        prediction = "📉 偏低开"
+        logic = f"{gamma_detail} → Call到期MM卖出平仓倾向"
+    elif vol_signal == "put_dominant":
+        direction = "bullish"
+        prediction = "📈 轻微高开"
+        logic = f"{vol_detail} → Put成交活跃，到期有买盘"
+    elif vol_signal == "call_dominant":
+        direction = "bearish"
+        prediction = "📉 轻微低开"
+        logic = f"{vol_detail} → Call成交活跃，到期有卖压"
+    else:
+        direction = "neutral"
+        prediction = "⚖️ 方向不明"
+        logic = "Gamma和Volume均衡，需结合价格位置判断"
+    
+    return {
+        'gamma_signal': gamma_signal,
+        'gamma_detail': gamma_detail,
+        'vol_signal': vol_signal,
+        'vol_detail': vol_detail,
+        'direction': direction,
+        'prediction': prediction,
+        'logic': logic
+    }
 
 def get_neg_strength(neg):
     """获取NEG强度"""
@@ -1388,36 +1660,35 @@ def get_neg_strength(neg):
     else:
         return neg_val, "⭐", "weak"
 
-def predict_monday_gap(friday_close_position, gamma_direction_type, neg_strength):
-    """预测下周一跳空方向"""
+def predict_monday_gap(friday_close_position, expiry_direction, neg_strength):
+    """预测下周一跳空方向 - 结合价格位置和到期方向"""
     confidence = "⭐⭐⭐" if neg_strength == "strong" else ("⭐⭐" if neg_strength == "medium" else "⭐")
     
+    direction = expiry_direction.get('direction', 'neutral')
+    base_prediction = expiry_direction.get('prediction', '⚖️ 方向不明')
+    
+    # 价格位置强化或冲突
     if friday_close_position == "above_cw":
-        if gamma_direction_type == "put_dominant":
-            return f"🚀 强势高开 {confidence}", "strong_bullish", "位置>CW + Put Gamma到期 → MM买入平仓"
-        elif gamma_direction_type == "call_dominant":
-            return f"⚠️ 冲突观望 {confidence}", "neutral", "位置>CW vs Call Gamma到期 → 方向不明"
+        if direction in ["strong_bullish", "bullish"]:
+            return f"🚀 强势高开 {confidence}", "strong_bullish", f"位置>CW + {expiry_direction['logic']}"
+        elif direction in ["strong_bearish", "bearish"]:
+            return f"⚠️ 信号冲突 {confidence}", "neutral", f"位置>CW(看多) vs {expiry_direction['logic']} → 观望"
         else:
-            return f"📈 轻微高开 {confidence}", "bullish", "位置>CW + Gamma均衡"
+            return f"📈 偏高开 {confidence}", "bullish", f"位置>CW支撑高开"
     
     elif friday_close_position == "below_pw":
-        if gamma_direction_type == "call_dominant":
-            return f"💀 强势低开 {confidence}", "strong_bearish", "位置<PW + Call Gamma到期 → MM卖出平仓"
-        elif gamma_direction_type == "put_dominant":
-            return f"⚠️ 冲突观望 {confidence}", "neutral", "位置<PW vs Put Gamma到期 → 方向不明"
+        if direction in ["strong_bearish", "bearish"]:
+            return f"💀 强势低开 {confidence}", "strong_bearish", f"位置<PW + {expiry_direction['logic']}"
+        elif direction in ["strong_bullish", "bullish"]:
+            return f"⚠️ 信号冲突 {confidence}", "neutral", f"位置<PW(看空) vs {expiry_direction['logic']} → 观望"
         else:
-            return f"📉 轻微低开 {confidence}", "bearish", "位置<PW + Gamma均衡"
+            return f"📉 偏低开 {confidence}", "bearish", f"位置<PW压制低开"
     
-    else:
-        if gamma_direction_type == "put_dominant":
-            return f"📈 轻微高开 {confidence}", "bullish", "区间内 + Put Gamma到期 → MM买入倾向"
-        elif gamma_direction_type == "call_dominant":
-            return f"📉 轻微低开 {confidence}", "bearish", "区间内 + Call Gamma到期 → MM卖出倾向"
-        else:
-            return f"⚖️ 方向不明 {confidence}", "neutral", "区间内 + Gamma均衡 → 观望"
+    else:  # 区间内
+        return f"{base_prediction} {confidence}", direction, expiry_direction['logic']
 
 def analyze_friday_expiry(df):
-    """分析周五到期Gamma数据"""
+    """分析周五到期Gamma数据 - 使用新逻辑"""
     results = []
     
     for _, row in df.iterrows():
@@ -1428,12 +1699,10 @@ def analyze_friday_expiry(df):
         current_price = parse_number_safe(row.get('Current Price'))
         call_wall = parse_number_safe(row.get('Call Wall'))
         put_wall = parse_number_safe(row.get('Put Wall'))
-        call_gamma = row.get('Call Gamma')
-        put_gamma = row.get('Put Gamma')
         neg = row.get('Next Exp Gamma')
         
-        # Gamma Direction
-        gd_value, gd_desc, gd_type = calculate_gamma_direction(call_gamma, put_gamma)
+        # 分析到期方向
+        expiry_analysis = analyze_expiry_direction(row)
         
         # NEG强度
         neg_val, neg_stars, neg_strength = get_neg_strength(neg)
@@ -1446,16 +1715,20 @@ def analyze_friday_expiry(df):
             current_position = "below_pw"
         
         # 预测
-        prediction, pred_type, pred_logic = predict_monday_gap(current_position, gd_type, neg_strength)
+        prediction, pred_type, pred_logic = predict_monday_gap(current_position, expiry_analysis, neg_strength)
         
         results.append({
             'Symbol': symbol,
             'Current Price': current_price,
             'Call Wall': call_wall,
             'Put Wall': put_wall,
-            'Gamma Direction': gd_value,
-            'GD Desc': gd_desc,
-            'GD Type': gd_type,
+            'Call Gamma': row.get('Call Gamma'),
+            'Put Gamma': row.get('Put Gamma'),
+            'Call Volume': row.get('Next Expir Call Volume'),
+            'Put Volume': row.get('Next Expir Put Volume'),
+            'Gamma Signal': expiry_analysis['gamma_detail'],
+            'Vol Signal': expiry_analysis['vol_detail'],
+            'Direction': expiry_analysis['direction'],
             'NEG': neg_val,
             'NEG Stars': neg_stars,
             'NEG Strength': neg_strength,
@@ -1490,37 +1763,55 @@ def main():
     with tab1:
         st.header("📈 QQQ/NQ 盘前分析")
         
+        # 数据输入区
+        col_input1, col_input2 = st.columns(2)
+        
+        with col_input1:
+            # QQQ CSV上传
+            qqq_csv_file = st.file_uploader(
+                "上传QQQ历史数据CSV（可选）",
+                type=['csv'],
+                key='qqq_csv_upload',
+                help="SpotGamma导出的QQQ数据，用于方向性分析"
+            )
+        
+        with col_input2:
+            st.info("💡 上传CSV可获得详细的方向性分析和情景分析")
+        
         # QQQ/NQ盘前数据粘贴框
         premarket_text = st.text_area(
             "粘贴盘前数据（QQQ和NQ）",
-            height=250,
+            height=200,
             placeholder="""QQQ盘前现价：__619.14__，昨收__620.78__ 
 630 Call Wall 
-625 Large Gamma 3 
-621.83 Combo 1 
-620 Large Gamma 1 
 620 Volatility Trigger 
 619 Zero Gamma 
-615 Large Gamma 2 
-610.12 Combo 4 
-610 Large Gamma 4 
-600.26 Combo 2 
 600 Put Wall 
-589.78 Combo 3 
 
 NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值 
 25901 26020 Combo 4 
-25600 25719 Large Gamma 4 
 ...""",
             key="premarket_input"
         )
+        
+        # 解析CSV数据
+        csv_data = None
+        if qqq_csv_file is not None:
+            try:
+                qqq_csv_df = pd.read_csv(qqq_csv_file)
+                # 取最新一行
+                if not qqq_csv_df.empty:
+                    csv_data = qqq_csv_df.iloc[-1].to_dict()
+                    st.success(f"✅ 已加载QQQ CSV数据")
+            except Exception as e:
+                st.warning(f"⚠️ CSV读取失败: {e}")
         
         if premarket_text.strip():
             # 解析盘前数据
             premarket_data = parse_qqq_premarket_text(premarket_text)
             
-            # 分析
-            analysis = analyze_qqq_nq(premarket_data)
+            # 分析（传入CSV数据）
+            analysis = analyze_qqq_nq(premarket_data, csv_data)
             
             # 显示分析结果
             col1, col2 = st.columns(2)
@@ -1548,7 +1839,6 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                     # 关键位
                     with st.expander("📊 QQQ关键位置", expanded=True):
                         for name, price in sorted(qqq.get('levels', {}).items(), key=lambda x: -x[1]):
-                            # 标记当前价格位置
                             if qqq['current'] and abs(price - qqq['current']) / qqq['current'] < 0.005:
                                 st.write(f"• **{price:.2f} {name}** ← 当前")
                             else:
@@ -1590,42 +1880,149 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                 else:
                     st.success(cv.get('message', ''))
             
-            # 预测
-            st.subheader("🔮 日内预测")
-            pred = analysis.get('prediction', {})
-            if pred:
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    st.metric("Gamma环境", pred.get('gamma_env', 'N/A'))
-                with col2:
-                    st.metric("波动环境", pred.get('vol_regime', 'N/A'))
-                with col3:
-                    st.metric("阻力区", pred.get('resistance', 'N/A'))
-                with col4:
-                    st.metric("支撑区", pred.get('support', 'N/A'))
+            st.divider()
+            
+            # ===== 方向性分析 =====
+            if analysis.get('directional', {}).get('items'):
+                st.subheader("📈 方向性分析")
                 
-                if pred.get('close_range'):
-                    st.info(f"📍 收盘预测区间: **{pred['close_range']}** (向Zero Gamma靠拢)")
+                directional = analysis['directional']
+                for item in directional.get('items', []):
+                    st.markdown(item)
                 
-                # 策略建议
-                st.subheader("📋 策略建议")
-                gamma_env_type = analysis.get('nq', {}).get('gamma_env_type') or analysis.get('qqq', {}).get('gamma_env_type')
-                vol_regime_type = analysis.get('nq', {}).get('vol_regime_type') or analysis.get('qqq', {}).get('vol_regime_type')
+                st.divider()
+            
+            # ===== 情景分析 =====
+            if analysis.get('scenarios'):
+                st.subheader("🔮 情景分析")
                 
-                if gamma_env_type == 'positive':
-                    st.success("""
-                    **正Gamma环境策略**:
-                    - Call Wall是阻力，Put Wall是支撑
-                    - 策略：高抛低吸，均值回归
-                    - 不追Call Wall突破（正Gamma会压制）
-                    """)
-                elif gamma_env_type == 'negative':
-                    st.error("""
-                    **负Gamma环境策略**:
-                    - Call Wall突破会加速上涨
-                    - Put Wall跌破会加速下跌
-                    - 策略：顺势操作，设好止损
-                    """)
+                scenarios = analysis['scenarios']
+                cols = st.columns(len(scenarios))
+                
+                for i, scenario in enumerate(scenarios):
+                    with cols[i]:
+                        prob = scenario['probability']
+                        color = "🟢" if prob >= 50 else ("🟡" if prob >= 25 else "🔴")
+                        st.markdown(f"**{scenario['name']}** ({prob}%) {color}")
+                        st.caption(scenario['description'])
+                        st.info(f"策略: {scenario['strategy']}")
+                
+                st.divider()
+            
+            # ===== 详细操作建议 =====
+            st.subheader("📋 详细操作建议")
+            
+            gamma_env_type = analysis.get('nq', {}).get('gamma_env_type') or analysis.get('qqq', {}).get('gamma_env_type')
+            qqq = analysis.get('qqq', {})
+            
+            if gamma_env_type == 'positive':
+                cw = qqq.get('call_wall')
+                pw = qqq.get('put_wall')
+                zg = qqq.get('zero_gamma')
+                vt = qqq.get('vol_trigger')
+                
+                advice = f"""
+                **正Gamma环境 - 均值回归策略**
+                
+                🎯 **做多区域**: 
+                - Zero Gamma ({zg:.0f if zg else 'N/A'}) 附近是最佳做多位置
+                - Put Wall ({pw:.0f if pw else 'N/A'}) 是强支撑，可加仓
+                
+                🎯 **减仓/做空区域**:
+                - Call Wall ({cw:.0f if cw else 'N/A'}) 附近减仓或轻仓做空
+                - 不追Call Wall突破！正Gamma会压制涨幅
+                
+                ⚠️ **风险控制**:
+                - 止损设在Zero Gamma下方2-3点
+                - 如果跌破Zero Gamma，观望等待企稳
+                - 如果价格跌破Volatility Trigger ({vt:.0f if vt else 'N/A'})，环境可能转为负Gamma
+                """
+                st.success(advice)
+            elif gamma_env_type == 'negative':
+                cw = qqq.get('call_wall')
+                pw = qqq.get('put_wall')
+                zg = qqq.get('zero_gamma')
+                
+                advice = f"""
+                **负Gamma环境 - 趋势跟随策略**
+                
+                ⚡ **趋势特征**:
+                - 波动放大，趋势延续性强
+                - Call Wall突破会加速上涨
+                - Put Wall跌破会加速下跌
+                
+                🎯 **操作建议**:
+                - 顺势操作，不抄底不摸顶
+                - 突破Call Wall ({cw:.0f if cw else 'N/A'}) 可追多
+                - 跌破Put Wall ({pw:.0f if pw else 'N/A'}) 可追空
+                
+                ⚠️ **风险控制**:
+                - 严格止损，波动可能很大
+                - 减小仓位，负Gamma环境风险高
+                - Zero Gamma ({zg:.0f if zg else 'N/A'}) 是关键分界线
+                """
+                st.error(advice)
+            
+            st.divider()
+            
+            # ===== 历史数据图表 =====
+            st.subheader("📊 关键位置历史走势")
+            
+            # 加载历史数据
+            qqq_history = load_worksheet_data("QQQ_History") or {}
+            today_str = datetime.now().strftime('%Y-%m-%d')
+            
+            # 保存今日数据按钮
+            col1, col2, col3 = st.columns([1,1,2])
+            with col1:
+                if st.button("💾 保存今日数据", key="save_qqq_history"):
+                    if qqq.get('call_wall') and qqq.get('put_wall'):
+                        qqq_history[today_str] = {
+                            'date': today_str,
+                            'call_wall': qqq.get('call_wall'),
+                            'put_wall': qqq.get('put_wall'),
+                            'zero_gamma': qqq.get('zero_gamma'),
+                            'vol_trigger': qqq.get('vol_trigger'),
+                            'current_price': qqq.get('current'),
+                            'gamma_env': gamma_env_type
+                        }
+                        save_worksheet_data("QQQ_History", qqq_history)
+                        st.success("✅ 已保存今日数据")
+                    else:
+                        st.warning("⚠️ 缺少关键位数据")
+            
+            with col2:
+                if st.button("🗑️ 清空历史", key="clear_qqq_history"):
+                    save_worksheet_data("QQQ_History", {})
+                    qqq_history = {}
+                    st.success("✅ 已清空")
+            
+            # 显示历史图表
+            if qqq_history and len(qqq_history) >= 2:
+                # 构建DataFrame
+                history_rows = []
+                for date_key, data in sorted(qqq_history.items()):
+                    history_rows.append({
+                        '日期': date_key,
+                        'Call Wall': data.get('call_wall'),
+                        'Put Wall': data.get('put_wall'),
+                        'Zero Gamma': data.get('zero_gamma'),
+                        'Vol Trigger': data.get('vol_trigger'),
+                        '收盘价': data.get('current_price')
+                    })
+                
+                history_df = pd.DataFrame(history_rows)
+                history_df['日期'] = pd.to_datetime(history_df['日期'])
+                history_df = history_df.set_index('日期')
+                
+                # 绘制图表
+                st.line_chart(history_df[['Call Wall', 'Put Wall', 'Zero Gamma', 'Vol Trigger']])
+                
+                # 显示数据表
+                with st.expander("📋 查看历史数据"):
+                    st.dataframe(history_df.reset_index(), use_container_width=True, hide_index=True)
+            else:
+                st.info("💡 保存至少2天的数据后可查看走势图")
         else:
             st.info("👆 请在上方粘贴QQQ/NQ盘前数据")
     
@@ -1652,19 +2049,19 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                 
                 if not friday_results.empty:
                     # 统计
-                    st.subheader("📊 Gamma Direction 概览")
+                    st.subheader("📊 到期方向概览")
                     
-                    put_dominant = len(friday_results[friday_results['GD Type'] == 'put_dominant'])
-                    call_dominant = len(friday_results[friday_results['GD Type'] == 'call_dominant'])
-                    neutral = len(friday_results[friday_results['GD Type'] == 'neutral'])
+                    bullish_count = len(friday_results[friday_results['Direction'].isin(['strong_bullish', 'bullish'])])
+                    bearish_count = len(friday_results[friday_results['Direction'].isin(['strong_bearish', 'bearish'])])
+                    neutral_count = len(friday_results[friday_results['Direction'] == 'neutral'])
                     
                     col1, col2, col3, col4 = st.columns(4)
                     with col1:
-                        st.metric("📈 Put主导到期", put_dominant, "高开倾向")
+                        st.metric("📈 偏高开", bullish_count, "Put Gamma/Vol主导")
                     with col2:
-                        st.metric("📉 Call主导到期", call_dominant, "低开倾向")
+                        st.metric("📉 偏低开", bearish_count, "Call Gamma/Vol主导")
                     with col3:
-                        st.metric("⚖️ 均衡", neutral)
+                        st.metric("⚖️ 方向不明", neutral_count)
                     with col4:
                         st.metric("📊 总计", len(friday_results))
                     
@@ -1676,8 +2073,13 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                     
                     if not high_neg.empty:
                         for _, row in high_neg.iterrows():
-                            gd_emoji = "📈" if row['GD Type'] == 'put_dominant' else (
-                                "📉" if row['GD Type'] == 'call_dominant' else "⚖️"
+                            direction = row.get('Direction', 'neutral')
+                            dir_emoji = "🚀" if direction == 'strong_bullish' else (
+                                "📈" if direction == 'bullish' else (
+                                    "💀" if direction == 'strong_bearish' else (
+                                        "📉" if direction == 'bearish' else "⚖️"
+                                    )
+                                )
                             )
                             
                             with st.container():
@@ -1687,9 +2089,14 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                     st.markdown(f"**{row['Symbol']}** {price_str}")
                                     st.caption(f"NEG: {row['NEG']:.1f}% {row['NEG Stars']}")
                                 with col2:
-                                    st.write(f"{gd_emoji} **{row['GD Desc']}** (GD={row['Gamma Direction']:.2f})")
+                                    st.write(f"{dir_emoji} **{row['Prediction']}**")
+                                    gamma_sig = row.get('Gamma Signal', '')
+                                    vol_sig = row.get('Vol Signal', '')
+                                    if gamma_sig:
+                                        st.write(f"Gamma: {gamma_sig}")
+                                    if vol_sig:
+                                        st.write(f"Volume: {vol_sig}")
                                     st.write(f"Pinning区间: {row['Pinning Range']}")
-                                    st.write(f"**预测**: {row['Prediction']}")
                                     st.caption(f"逻辑: {row['Pred Logic']}")
                                 st.divider()
                     else:
@@ -1698,9 +2105,9 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                     # 完整表格
                     with st.expander("📋 查看完整分析表"):
                         display_cols = ['Symbol', 'Current Price', 'Call Wall', 'Put Wall', 
-                                       'Gamma Direction', 'GD Desc', 'NEG', 'NEG Stars', 'Prediction']
+                                       'Gamma Signal', 'Vol Signal', 'NEG', 'NEG Stars', 'Prediction']
                         available_cols = [c for c in display_cols if c in friday_results.columns]
-                        st.dataframe(friday_results[available_cols].round(3), use_container_width=True, hide_index=True)
+                        st.dataframe(friday_results[available_cols], use_container_width=True, hide_index=True)
                     
                     # 追踪功能
                     st.subheader("📈 周五到期 追踪")
@@ -1731,8 +2138,9 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                         'entry_price': float(row['Current Price']) if row['Current Price'] else 0,
                                         'call_wall': float(row['Call Wall']) if row['Call Wall'] else 0,
                                         'put_wall': float(row['Put Wall']) if row['Put Wall'] else 0,
-                                        'gamma_direction': row['Gamma Direction'],
-                                        'gd_type': row['GD Type'],
+                                        'gamma_signal': row.get('Gamma Signal', ''),
+                                        'vol_signal': row.get('Vol Signal', ''),
+                                        'direction': row.get('Direction', 'neutral'),
                                         'neg_initial': row['NEG'],
                                         'neg_history': {today_str: row['NEG']},
                                         'prediction': row['Prediction'],
@@ -1759,6 +2167,9 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                     
                                     fe_tracking[symbol]['prediction'] = row['Prediction']
                                     fe_tracking[symbol]['pred_type'] = row['Pred Type']
+                                    fe_tracking[symbol]['gamma_signal'] = row.get('Gamma Signal', '')
+                                    fe_tracking[symbol]['vol_signal'] = row.get('Vol Signal', '')
+                                    fe_tracking[symbol]['direction'] = row.get('Direction', 'neutral')
                                     updated_count += 1
                             
                             # 标记消失的标的
@@ -2917,14 +3328,27 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                             st.info("无特殊信号")
                     
                     # ===== 完整分析表 =====
-                    with st.expander("📋 查看完整分析表"):
-                        full_cols = ['Symbol', 'Current Price', 'Trade_Signal', 'Price_Position', 
-                                    'Option_Structure', 'Vol_Regime', 'Gamma_Magnet', 'Delta Ratio', 'Gamma Ratio',
-                                    'Put Wall', 'Call Wall', 'Hedge Wall', 'Dist_to_PW_%', 'Dist_to_CW_%', 
-                                    'Options Impact', 'Volume Ratio', 'Next Exp Gamma']
-                        available_cols = [c for c in full_cols if c in sg_filtered.columns]
-                        df_sorted = sg_filtered.sort_values('Options Impact', ascending=False)
-                        st.dataframe(df_sorted[available_cols].round(2), use_container_width=True, hide_index=True)
+                    st.subheader("📋 完整分析表")
+                    
+                    # 添加过滤选项
+                    show_all_stocks = st.checkbox(
+                        "显示所有股票（忽略Options Impact过滤）", 
+                        value=False,
+                        key="show_all_stocks",
+                        help=f"勾选后显示CSV中所有{len(sg_df)}只股票，否则只显示Options Impact ≥ {min_options_impact}%的{len(sg_filtered)}只"
+                    )
+                    
+                    display_df = sg_df if show_all_stocks else sg_filtered
+                    
+                    full_cols = ['Symbol', 'Current Price', 'Trade_Signal', 'Price_Position', 
+                                'Option_Structure', 'Vol_Regime', 'Gamma_Magnet', 'Delta Ratio', 'Gamma Ratio',
+                                'Put Wall', 'Call Wall', 'Hedge Wall', 'Dist_to_PW_%', 'Dist_to_CW_%', 
+                                'Options Impact', 'Volume Ratio', 'Next Exp Gamma', 'CW_Increase']
+                    available_cols = [c for c in full_cols if c in display_df.columns]
+                    df_sorted = display_df.sort_values('Options Impact', ascending=False)
+                    
+                    st.caption(f"显示: {len(display_df)} 只标的 {'(全部)' if show_all_stocks else f'(Options Impact ≥ {min_options_impact}%)'}")
+                    st.dataframe(df_sorted[available_cols].round(2), use_container_width=True, hide_index=True)
                     
                     # ===== 交叉验证 =====
                     st.subheader("🎯 与技术筛选交叉验证")
@@ -3522,6 +3946,85 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                             type_df = pd.DataFrame(type_rows)
                             type_df = type_df.sort_values('总数', ascending=False)
                             st.dataframe(type_df, use_container_width=True, hide_index=True)
+                        
+                        # ===== 已完成追踪历史 =====
+                        st.subheader("📚 已完成追踪历史")
+                        st.caption("追踪周期结束的标的，用于分析历史准确率")
+                        
+                        # 分离追踪中和已完成的记录
+                        completed_records = []
+                        for symbol, record in tracking_data.items():
+                            status = record.get('status', 'tracking')
+                            track_end = record.get('track_end_date', '')
+                            
+                            # 检查是否已过追踪结束日期
+                            is_completed = status == 'completed'
+                            if track_end:
+                                try:
+                                    end_date = datetime.strptime(track_end, '%Y-%m-%d')
+                                    if datetime.now() > end_date:
+                                        is_completed = True
+                                except:
+                                    pass
+                            
+                            if is_completed:
+                                # 计算最终收益
+                                entry_price = record.get('entry_price', 0)
+                                daily_prices = record.get('daily_prices', {})
+                                if daily_prices and entry_price > 0:
+                                    latest_date = max(daily_prices.keys())
+                                    final_price = daily_prices[latest_date]
+                                    final_return = ((final_price - entry_price) / entry_price) * 100
+                                else:
+                                    final_return = 0
+                                
+                                # 判断最终结果
+                                direction = record.get('signal_direction', 'neutral')
+                                if direction == 'bullish':
+                                    final_correct = final_return > 0
+                                elif direction == 'bearish':
+                                    final_correct = final_return < 0
+                                else:
+                                    final_correct = None
+                                
+                                completed_records.append({
+                                    '标的': symbol,
+                                    '信号类型': record.get('signal_type', '')[:25],
+                                    '信号方向': '🟢多' if direction == 'bullish' else ('🔴空' if direction == 'bearish' else '⚪中'),
+                                    '入场价': entry_price,
+                                    '最终收益': final_return,
+                                    '结果': '✅正确' if final_correct == True else ('❌错误' if final_correct == False else '⚪不判定'),
+                                    '到期日': record.get('top_gamma_exp', ''),
+                                    '追踪结束': track_end,
+                                    'CW上移': '✓' if record.get('cw_increase') else ''
+                                })
+                        
+                        if completed_records:
+                            completed_df = pd.DataFrame(completed_records)
+                            
+                            # 统计历史准确率
+                            total_judged = len([r for r in completed_records if r['结果'] != '⚪不判定'])
+                            total_correct = len([r for r in completed_records if r['结果'] == '✅正确'])
+                            history_accuracy = (total_correct / total_judged * 100) if total_judged > 0 else 0
+                            
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                st.metric("历史准确率", f"{history_accuracy:.1f}%", f"{total_correct}/{total_judged}")
+                            with col2:
+                                st.metric("已完成追踪", len(completed_records))
+                            with col3:
+                                cw_correct = len([r for r in completed_records if r['CW上移'] == '✓' and r['结果'] == '✅正确'])
+                                cw_total = len([r for r in completed_records if r['CW上移'] == '✓' and r['结果'] != '⚪不判定'])
+                                cw_acc = (cw_correct / cw_total * 100) if cw_total > 0 else 0
+                                st.metric("CW上移准确率", f"{cw_acc:.1f}%", f"{cw_correct}/{cw_total}")
+                            
+                            st.dataframe(
+                                completed_df.style.format({'入场价': '${:.2f}', '最终收益': '{:+.2f}%'}),
+                                use_container_width=True, 
+                                hide_index=True
+                            )
+                        else:
+                            st.info("暂无已完成的追踪记录")
                     else:
                         st.info("暂无追踪记录")
                         
