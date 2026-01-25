@@ -1526,33 +1526,6 @@ def parse_number_safe(value):
     except:
         return None
 
-def calculate_gamma_direction(call_gamma, put_gamma):
-    """
-    计算Gamma Direction（到期方向指标）
-    使用Call/Put Gamma绝对值比较
-    """
-    call_g = parse_number_safe(call_gamma)
-    put_g = parse_number_safe(put_gamma)
-    
-    if call_g is None or put_g is None:
-        return None, None, "unknown"
-    
-    call_g = abs(call_g)
-    put_g = abs(put_g)
-    
-    if call_g + put_g == 0:
-        return None, None, "unknown"
-    
-    # Put Gamma占比
-    put_ratio = put_g / (put_g + call_g)
-    
-    if put_ratio > 0.6:
-        return put_ratio, put_g, "put_dominant"
-    elif put_ratio < 0.4:
-        return put_ratio, call_g, "call_dominant"
-    else:
-        return put_ratio, max(call_g, put_g), "neutral"
-
 def get_neg_strength(neg):
     """
     获取NEG强度 - 基于做市商解绑压力
@@ -1573,199 +1546,345 @@ def get_neg_strength(neg):
     else:
         return neg_val, "⭐", "weak"
 
-def analyze_mm_unwinding(row):
+def analyze_mm_unwinding_v2(row):
     """
-    分析做市商解绑效应（MM Unwinding Analysis）
+    分析做市商解绑效应（MM Unwinding Analysis）- V2版本
     
-    核心逻辑：
-    周五收盘时，大量期权合约作废。做市商必须在周一开盘前后，
-    平掉（卖出或买回）他们为了对冲这些合约而持有的底层股票。
-    
-    1. Bearish Unwinding（跳空低开）条件：
-       - 高浓度：NEG > 35%
-       - 位置关键：收盘价 >= Call Wall 或 距离CW < 0.5%
-       - 对冲状态：Next Exp Delta为正值（MM持有多头对冲Call）
-       → 周一MM需卖出多头股票
-    
-    2. Bullish Unwinding（跳空高开）条件：
-       - 高浓度：NEG > 35%
-       - 位置关键：收盘价 <= Put Wall 或 距离PW < 0.5%
-       - 对冲状态：Next Exp Delta为负值（MM持有空头对冲Put）
-       → 周一MM需买回股票空头
+    使用SpotGamma Equity Hub完整字段进行分析
     """
+    # ========== 提取所有可用字段 ==========
     current_price = parse_number_safe(row.get('Current Price'))
     call_wall = parse_number_safe(row.get('Call Wall'))
     put_wall = parse_number_safe(row.get('Put Wall'))
-    neg = row.get('Next Exp Gamma')
+    hedge_wall = parse_number_safe(row.get('Hedge Wall'))
+    key_delta_strike = parse_number_safe(row.get('Key Delta Strike'))
+    key_gamma_strike = parse_number_safe(row.get('Key Gamma Strike'))
     
-    # Next Exp Delta - 关键指标
-    next_exp_delta = parse_number_safe(row.get('Next Exp Delta'))
+    # 浓度指标
+    neg = row.get('Next Exp Gamma')  # Next Expiry Gamma %
+    ned = row.get('Next Exp Delta')  # Next Expiry Delta %
     
-    # Call/Put Volume用于辅助验证
-    call_vol = parse_number_safe(row.get('Next Expir Call Volume'))
-    put_vol = parse_number_safe(row.get('Next Expir Put Volume'))
+    # 方向性指标
+    delta_ratio_raw = row.get('Delta Ratio')
+    gamma_ratio = parse_number_safe(row.get('Gamma Ratio'))
+    volume_ratio = parse_number_safe(row.get('Volume Ratio'))
     
-    # NEG强度
+    # 到期成交量占比
+    next_exp_call_vol = parse_number_safe(row.get('Next Exp Call Vol'))
+    next_exp_put_vol = parse_number_safe(row.get('Next Exp Put Vol'))
+    
+    # 其他指标
+    options_impact = parse_number_safe(row.get('Options Impact'))
+    iv_rank = parse_number_safe(row.get('IV Rank'))
+    dpi = parse_number_safe(row.get('DPI'))
+    implied_move = parse_number_safe(row.get('Options Implied Move'))
+    
+    # 财报日期
+    earnings_date = row.get('Earnings Date')
+    
+    # ========== 解析浓度 ==========
     neg_val, neg_stars, neg_strength = get_neg_strength(neg)
+    ned_val = parse_number_safe(str(ned).replace('%', '')) if ned else 0
+    if ned_val and ned_val < 1:
+        ned_val = ned_val * 100
     
-    # 计算偏离度
+    # ========== 解析Delta Ratio ==========
+    delta_ratio = None
+    if delta_ratio_raw:
+        delta_ratio_str = str(delta_ratio_raw).replace("'", "").replace("-", "")
+        try:
+            delta_ratio = -abs(float(delta_ratio_str))  # Delta Ratio通常是负数
+        except:
+            delta_ratio = None
+    
+    # ========== 计算位置 ==========
     dist_to_cw = None
     dist_to_pw = None
+    position_zone = "middle"  # middle, near_cw, above_cw, near_pw, below_pw
+    
     if current_price and call_wall and call_wall > 0:
-        dist_to_cw = (current_price - call_wall) / current_price * 100  # 正数=在CW上方
+        dist_to_cw = (current_price - call_wall) / call_wall * 100
     if current_price and put_wall and put_wall > 0:
-        dist_to_pw = (current_price - put_wall) / current_price * 100   # 正数=在PW上方
+        dist_to_pw = (current_price - put_wall) / put_wall * 100
     
-    # 位置判定
-    near_cw = dist_to_cw is not None and -0.5 <= dist_to_cw <= 1.0  # 距离CW在-0.5%到+1%之间
-    near_pw = dist_to_pw is not None and -1.0 <= dist_to_pw <= 0.5  # 距离PW在-1%到+0.5%之间
-    above_cw = dist_to_cw is not None and dist_to_cw > 0
-    below_pw = dist_to_pw is not None and dist_to_pw < 0
+    # 判断位置区域
+    if dist_to_cw is not None:
+        if dist_to_cw > 2:
+            position_zone = "far_above_cw"
+        elif dist_to_cw > 0:
+            position_zone = "above_cw"
+        elif dist_to_cw >= -0.5:
+            position_zone = "near_cw"
     
-    # Delta方向判断
-    delta_positive = next_exp_delta is not None and next_exp_delta > 0  # MM持有多头
-    delta_negative = next_exp_delta is not None and next_exp_delta < 0  # MM持有空头
-    delta_strong_positive = next_exp_delta is not None and next_exp_delta > 0.3
-    delta_strong_negative = next_exp_delta is not None and next_exp_delta < -0.3
+    if dist_to_pw is not None:
+        if dist_to_pw < -2:
+            position_zone = "far_below_pw"
+        elif dist_to_pw < 0:
+            position_zone = "below_pw"
+        elif dist_to_pw <= 0.5:
+            position_zone = "near_pw"
     
-    # Volume趋势（Put/Call比值）
-    vol_ratio = None
-    if call_vol and put_vol and (call_vol + put_vol) > 0:
-        vol_ratio = put_vol / (call_vol + put_vol)
+    # ========== 判断到期期权类型主导 ==========
+    call_dominant = False
+    put_dominant = False
     
-    # ========== 信号判定 ==========
-    signal_type = "neutral"
-    prediction = "⚖️ 观望"
-    confidence = neg_stars
-    logic_parts = []
-    warnings = []
+    # 方法1: 比较Next Exp Call/Put Volume
+    if next_exp_call_vol and next_exp_put_vol:
+        if next_exp_call_vol > next_exp_put_vol * 1.2:
+            call_dominant = True
+        elif next_exp_put_vol > next_exp_call_vol * 1.2:
+            put_dominant = True
     
-    # 检查信号强度
-    if neg_strength == "weak":
-        signal_type = "weak"
-        prediction = "⚪ 弱信号"
-        logic_parts.append(f"NEG {neg_val:.1f}% < 25%，浓度不足")
+    # 方法2: Key Delta Strike位置判断ITM
+    key_delta_itm_call = key_delta_strike and current_price and key_delta_strike < current_price
+    key_delta_itm_put = key_delta_strike and current_price and key_delta_strike > current_price
     
-    else:
-        # ===== Bearish Unwinding 判定 =====
-        bearish_conditions = []
-        bearish_score = 0
-        
-        # 条件A：高浓度
-        if neg_strength == "strong":
-            bearish_conditions.append(f"✓ 高浓度 NEG={neg_val:.1f}%")
-            bearish_score += 2
-        elif neg_strength == "medium":
-            bearish_conditions.append(f"○ 中浓度 NEG={neg_val:.1f}%")
-            bearish_score += 1
-        
-        # 条件B：位置在Call Wall附近或上方
-        if above_cw or near_cw:
-            dist_str = f"{dist_to_cw:+.2f}%" if dist_to_cw else ""
-            bearish_conditions.append(f"✓ 接近CW {dist_str}")
-            bearish_score += 2
-        
-        # 条件C：Delta为正（MM持有多头）
-        if delta_positive:
-            delta_str = f"{next_exp_delta:.2f}" if next_exp_delta else ""
-            bearish_conditions.append(f"✓ Delta正值={delta_str}（MM持多头）")
-            bearish_score += 2 if delta_strong_positive else 1
-        
-        # 辅助：Call Volume活跃
-        if vol_ratio and vol_ratio < 0.45:
-            bearish_conditions.append(f"✓ Call成交活跃")
-            bearish_score += 1
-        
-        # ===== Bullish Unwinding 判定 =====
-        bullish_conditions = []
-        bullish_score = 0
-        
-        # 条件A：高浓度
-        if neg_strength == "strong":
-            bullish_conditions.append(f"✓ 高浓度 NEG={neg_val:.1f}%")
-            bullish_score += 2
-        elif neg_strength == "medium":
-            bullish_conditions.append(f"○ 中浓度 NEG={neg_val:.1f}%")
-            bullish_score += 1
-        
-        # 条件B：位置在Put Wall附近或下方
-        if below_pw or near_pw:
-            dist_str = f"{dist_to_pw:+.2f}%" if dist_to_pw else ""
-            bullish_conditions.append(f"✓ 接近PW {dist_str}")
-            bullish_score += 2
-        
-        # 条件C：Delta为负（MM持有空头）
-        if delta_negative:
-            delta_str = f"{next_exp_delta:.2f}" if next_exp_delta else ""
-            bullish_conditions.append(f"✓ Delta负值={delta_str}（MM持空头）")
-            bullish_score += 2 if delta_strong_negative else 1
-        
-        # 辅助：Put Volume活跃
-        if vol_ratio and vol_ratio > 0.55:
-            bullish_conditions.append(f"✓ Put成交活跃")
-            bullish_score += 1
-        
-        # ===== 最终判定 =====
-        if bearish_score >= 4 and bearish_score > bullish_score:
-            # Bearish Unwinding
-            if bearish_score >= 6:
-                signal_type = "strong_bearish"
-                prediction = f"💀 强势低开 {confidence}"
+    # ========== 财报日检查 ==========
+    earnings_conflict = False
+    if earnings_date and pd.notna(earnings_date):
+        try:
+            if isinstance(earnings_date, str):
+                earnings_dt = pd.to_datetime(earnings_date)
             else:
-                signal_type = "bearish"
-                prediction = f"📉 偏低开 {confidence}"
-            logic_parts = bearish_conditions
-            logic_parts.append("→ 周一MM需卖出多头对冲")
-            
-        elif bullish_score >= 4 and bullish_score > bearish_score:
-            # Bullish Unwinding
-            if bullish_score >= 6:
-                signal_type = "strong_bullish"
-                prediction = f"🚀 强势高开 {confidence}"
-            else:
-                signal_type = "bullish"
-                prediction = f"📈 偏高开 {confidence}"
-            logic_parts = bullish_conditions
-            logic_parts.append("→ 周一MM需买回空头对冲")
-            
-        elif bearish_score >= 3 or bullish_score >= 3:
-            # 条件部分满足
-            if bearish_score > bullish_score:
-                signal_type = "bearish_watch"
-                prediction = f"📉 倾向低开（条件不完整）{confidence}"
-                logic_parts = bearish_conditions
-            elif bullish_score > bearish_score:
-                signal_type = "bullish_watch"
-                prediction = f"📈 倾向高开（条件不完整）{confidence}"
-                logic_parts = bullish_conditions
-            else:
-                signal_type = "neutral"
-                prediction = f"⚖️ 信号冲突 {confidence}"
-                logic_parts.append(f"多空条件均衡：看跌{bearish_score}分 vs 看涨{bullish_score}分")
-        else:
-            signal_type = "neutral"
-            prediction = f"⚖️ 条件不足 {confidence}"
-            logic_parts.append("位置和Delta条件均不满足")
+                earnings_dt = earnings_date
+            # 检查是否在本周五或下周一
+            today = pd.Timestamp.now()
+            days_diff = (earnings_dt - today).days
+            if -1 <= days_diff <= 3:  # 财报在周五前后几天
+                earnings_conflict = True
+        except:
+            pass
     
-    return {
-        'signal_type': signal_type,
-        'prediction': prediction,
-        'logic': ' | '.join(logic_parts),
-        'neg_val': neg_val,
-        'neg_stars': neg_stars,
-        'neg_strength': neg_strength,
+    # ========== 构建详细分析 ==========
+    analysis = {
+        'signal_type': 'neutral',
+        'prediction': '⚖️ 观望',
+        'confidence': neg_stars,
+        'position_zone': position_zone,
+        'mm_behavior': '',
+        'logic_chain': [],
+        'warnings': [],
+        'data_summary': {}
+    }
+    
+    # 数据摘要
+    analysis['data_summary'] = {
+        'neg': neg_val,
+        'ned': ned_val,
         'dist_to_cw': dist_to_cw,
         'dist_to_pw': dist_to_pw,
-        'next_exp_delta': next_exp_delta,
-        'vol_ratio': vol_ratio,
-        'warnings': warnings
+        'delta_ratio': delta_ratio,
+        'gamma_ratio': gamma_ratio,
+        'next_exp_call_vol': next_exp_call_vol,
+        'next_exp_put_vol': next_exp_put_vol,
+        'key_delta_strike': key_delta_strike,
+        'options_impact': options_impact,
+        'iv_rank': iv_rank,
+        'dpi': dpi,
+        'implied_move': implied_move
     }
-
-def analyze_friday_expiry(df):
-    """
-    分析周五到期Gamma数据 - 基于做市商解绑框架
     
-    核心逻辑：周五大量期权到期，做市商需在周一平仓对冲头寸
+    # ========== 浓度检查 ==========
+    if neg_strength == "weak" and (ned_val is None or ned_val < 25):
+        analysis['signal_type'] = 'weak'
+        analysis['prediction'] = '⚪ 弱信号 - 浓度不足'
+        analysis['logic_chain'].append(f"❌ 浓度不足：NEG={neg_val:.1f}%，本周到期期权占比太低")
+        analysis['logic_chain'].append("→ 做市商解绑压力小，信号不可靠")
+        return analysis
+    
+    # ========== 财报冲突检查 ==========
+    if earnings_conflict:
+        analysis['warnings'].append(f"⚠️ 财报日冲突：财报可能在本周五/下周一，基本面冲击可能覆盖期权信号")
+    
+    # ========== 场景判定 ==========
+    
+    # ---------- 场景1: 价格远高于Call Wall (>2%) ----------
+    if position_zone == "far_above_cw":
+        analysis['signal_type'] = 'strong_bearish'
+        analysis['prediction'] = f'💀💀 强势低开 {neg_stars}'
+        
+        analysis['logic_chain'] = [
+            f"📍 【极端位置】价格 ${current_price:.2f} 远高于 Call Wall ${call_wall:.2f} (+{dist_to_cw:.1f}%)",
+            "",
+            "🔍 【周五前状态】",
+            f"   • 投资者持有大量 ITM Call（深度价内看涨期权）",
+            f"   • 做市商卖出这些Call（Short Call）= 负Delta暴露",
+            f"   • 为对冲，做市商买入大量股票（Long Stock）",
+            "",
+            "📅 【周五到期】",
+            f"   • 这些Deep ITM Call到期/被行权，合约消失",
+            f"   • 做市商的Short Call头寸消失",
+            f"   • 但做市商手中仍持有【大量裸多头股票】",
+            "",
+            "📉 【周一解绑】",
+            f"   • 做市商不愿持有无对冲目的的裸多头",
+            f"   • 做市商集体卖出股票平仓",
+            f"   • 大量卖压 → 股价下跌 → 💀 低开",
+        ]
+        
+        if neg_val >= 35:
+            analysis['logic_chain'].append(f"")
+            analysis['logic_chain'].append(f"⚡ 【强化因素】NEG={neg_val:.1f}%，到期浓度极高，卖压更大")
+        
+        analysis['mm_behavior'] = "MM大量Long Stock → 周一卖出平仓 → 强卖压"
+    
+    # ---------- 场景2: 价格略高于或接近Call Wall ----------
+    elif position_zone in ["above_cw", "near_cw"]:
+        # 需要进一步判断是Call还是Put主导
+        if call_dominant or key_delta_itm_call:
+            analysis['signal_type'] = 'bearish'
+            analysis['prediction'] = f'📉 偏低开 {neg_stars}'
+            
+            vol_info = ""
+            if next_exp_call_vol and next_exp_put_vol:
+                vol_info = f"（Call到期量{next_exp_call_vol:.1%} > Put到期量{next_exp_put_vol:.1%}）"
+            
+            analysis['logic_chain'] = [
+                f"📍 【位置】价格 ${current_price:.2f} 接近 Call Wall ${call_wall:.2f} ({dist_to_cw:+.1f}%)",
+                "",
+                "🔍 【期权结构】",
+                f"   • 本周到期Call成交量占主导 {vol_info}",
+                f"   • Key Delta Strike ${key_delta_strike} < 当前价 = Call在价内(ITM)",
+                "",
+                "🔍 【做市商对冲链】",
+                f"   • 投资者买入Call → MM卖出Call（Short Call）",
+                f"   • Short Call = 负Delta → MM买入股票对冲（Long Stock）",
+                "",
+                "📅 【周五到期】",
+                f"   • ITM Call到期，MM的Short Call消失",
+                f"   • MM剩余裸多头股票",
+                "",
+                "📉 【周一解绑】",
+                f"   • MM卖出裸多头 → 卖压 → 低开",
+            ]
+            
+            analysis['mm_behavior'] = "MM持有Long Stock对冲 → Call到期后卖出 → 卖压"
+        
+        else:
+            analysis['signal_type'] = 'neutral'
+            analysis['prediction'] = f'⚖️ 接近Call Wall但方向不明 {neg_stars}'
+            analysis['logic_chain'] = [
+                f"📍 价格接近Call Wall，但未确认Call到期量主导",
+                f"   • Next Exp Call Vol: {next_exp_call_vol:.1%}" if next_exp_call_vol else "   • Next Exp Call Vol: N/A",
+                f"   • Next Exp Put Vol: {next_exp_put_vol:.1%}" if next_exp_put_vol else "   • Next Exp Put Vol: N/A",
+                "→ 需要更多数据确认方向"
+            ]
+            analysis['mm_behavior'] = "方向待确认"
+    
+    # ---------- 场景3: 价格远低于Put Wall (<-2%) ----------
+    elif position_zone == "far_below_pw":
+        analysis['signal_type'] = 'strong_bullish'
+        analysis['prediction'] = f'🚀🚀 强势反弹 {neg_stars}'
+        
+        analysis['logic_chain'] = [
+            f"📍 【极端位置】价格 ${current_price:.2f} 远低于 Put Wall ${put_wall:.2f} ({dist_to_pw:.1f}%)",
+            "",
+            "🔍 【周五前状态】",
+            f"   • 投资者持有大量 ITM Put（深度价内看跌期权）",
+            f"   • 做市商卖出这些Put（Short Put）= 正Delta暴露",
+            f"   • 为对冲，做市商做空大量股票（Short Stock）",
+            "",
+            "📅 【周五到期】",
+            f"   • 这些Deep ITM Put到期/被行权，合约消失",
+            f"   • 做市商的Short Put头寸消失",
+            f"   • 但做市商手中仍持有【大量裸空头股票】",
+            "",
+            "📈 【周一解绑】",
+            f"   • 做市商不愿持有无对冲目的的裸空头",
+            f"   • 做市商集体买入股票平仓（空头回补）",
+            f"   • 大量买压 → 股价上涨 → 🚀 高开/反弹",
+        ]
+        
+        if neg_val >= 35:
+            analysis['logic_chain'].append(f"")
+            analysis['logic_chain'].append(f"⚡ 【强化因素】NEG={neg_val:.1f}%，到期浓度极高，买压更大")
+        
+        # 风险提示
+        if iv_rank and iv_rank > 0.7:
+            analysis['warnings'].append(f"⚠️ IV Rank={iv_rank:.1%}偏高，市场恐慌可能未结束，反弹可能被新卖盘压制")
+        
+        analysis['mm_behavior'] = "MM大量Short Stock → 周一买入平仓 → 强买压（空头回补）"
+    
+    # ---------- 场景4: 价格略低于或接近Put Wall ----------
+    elif position_zone in ["below_pw", "near_pw"]:
+        if put_dominant or key_delta_itm_put:
+            analysis['signal_type'] = 'bullish'
+            analysis['prediction'] = f'📈 偏高开 {neg_stars}'
+            
+            vol_info = ""
+            if next_exp_call_vol and next_exp_put_vol:
+                vol_info = f"（Put到期量{next_exp_put_vol:.1%} > Call到期量{next_exp_call_vol:.1%}）"
+            
+            analysis['logic_chain'] = [
+                f"📍 【位置】价格 ${current_price:.2f} 接近 Put Wall ${put_wall:.2f} ({dist_to_pw:+.1f}%)",
+                "",
+                "🔍 【期权结构】",
+                f"   • 本周到期Put成交量占主导 {vol_info}",
+                f"   • Key Delta Strike ${key_delta_strike} > 当前价 = Put在价内(ITM)",
+                "",
+                "🔍 【做市商对冲链】",
+                f"   • 投资者买入Put → MM卖出Put（Short Put）",
+                f"   • Short Put = 正Delta → MM做空股票对冲（Short Stock）",
+                "",
+                "📅 【周五到期】",
+                f"   • ITM Put到期，MM的Short Put消失",
+                f"   • MM剩余裸空头股票",
+                "",
+                "📈 【周一解绑】",
+                f"   • MM买入股票平空头 → 买压 → 高开",
+            ]
+            
+            analysis['mm_behavior'] = "MM持有Short Stock对冲 → Put到期后买入平仓 → 买压"
+        
+        else:
+            analysis['signal_type'] = 'neutral'
+            analysis['prediction'] = f'⚖️ 接近Put Wall但方向不明 {neg_stars}'
+            analysis['logic_chain'] = [
+                f"📍 价格接近Put Wall，但未确认Put到期量主导",
+                f"   • Next Exp Put Vol: {next_exp_put_vol:.1%}" if next_exp_put_vol else "   • Next Exp Put Vol: N/A",
+                f"   • Next Exp Call Vol: {next_exp_call_vol:.1%}" if next_exp_call_vol else "   • Next Exp Call Vol: N/A",
+                "→ 需要更多数据确认方向"
+            ]
+            analysis['mm_behavior'] = "方向待确认"
+    
+    # ---------- 场景5: 价格在中间区域 ----------
+    else:
+        analysis['signal_type'] = 'neutral'
+        analysis['prediction'] = f'⚖️ 中性区域 {neg_stars}'
+        analysis['logic_chain'] = [
+            f"📍 价格 ${current_price:.2f} 在Put Wall和Call Wall之间",
+            f"   • 距离Call Wall: {dist_to_cw:+.1f}%" if dist_to_cw else "   • 距离Call Wall: N/A",
+            f"   • 距离Put Wall: {dist_to_pw:+.1f}%" if dist_to_pw else "   • 距离Put Wall: N/A",
+            "",
+            "→ 价格未接近关键位，做市商解绑压力不集中于单一方向",
+            "→ 需观察其他指标或等待价格接近关键位"
+        ]
+        analysis['mm_behavior'] = "价格在中间，解绑方向不明确"
+    
+    # ========== 添加辅助指标信息 ==========
+    if options_impact:
+        if options_impact > 30:
+            analysis['logic_chain'].append(f"")
+            analysis['logic_chain'].append(f"📊 【期权影响度】Options Impact = {options_impact:.1f}%（高），期权流主导股价，信号可信度高")
+        elif options_impact < 10:
+            analysis['warnings'].append(f"⚠️ Options Impact={options_impact:.1f}%偏低，基本面可能主导股价，期权信号可能失效")
+    
+    if dpi:
+        if analysis['signal_type'] in ['bullish', 'strong_bullish'] and dpi > 52:
+            analysis['logic_chain'].append(f"✅ 【暗池确认】DPI={dpi:.1f}%，机构买入活跃，支持看涨")
+        elif analysis['signal_type'] in ['bearish', 'strong_bearish'] and dpi < 48:
+            analysis['logic_chain'].append(f"✅ 【暗池确认】DPI={dpi:.1f}%，机构卖出活跃，支持看跌")
+    
+    if implied_move:
+        analysis['logic_chain'].append(f"")
+        analysis['logic_chain'].append(f"📏 【预期波动】Options Implied Move = ${implied_move:.2f}，周一波动可能在此范围")
+    
+    return analysis
+
+
+def analyze_friday_expiry_v2(df):
+    """
+    分析周五到期Gamma数据 - V2版本，支持完整Equity Hub字段
     """
     results = []
     
@@ -1778,8 +1897,8 @@ def analyze_friday_expiry(df):
         call_wall = parse_number_safe(row.get('Call Wall'))
         put_wall = parse_number_safe(row.get('Put Wall'))
         
-        # 做市商解绑分析
-        unwinding = analyze_mm_unwinding(row)
+        # 做市商解绑分析 V2
+        analysis = analyze_mm_unwinding_v2(row)
         
         # 构建结果
         results.append({
@@ -1787,16 +1906,24 @@ def analyze_friday_expiry(df):
             'Current Price': current_price,
             'Call Wall': call_wall,
             'Put Wall': put_wall,
-            'NEG': unwinding['neg_val'],
-            'NEG Stars': unwinding['neg_stars'],
-            'NEG Strength': unwinding['neg_strength'],
-            'Dist_to_CW': unwinding['dist_to_cw'],
-            'Dist_to_PW': unwinding['dist_to_pw'],
-            'Next Exp Delta': unwinding['next_exp_delta'],
-            'Vol Ratio': unwinding['vol_ratio'],
-            'Signal Type': unwinding['signal_type'],
-            'Prediction': unwinding['prediction'],
-            'Logic': unwinding['logic'],
+            'Key Delta Strike': analysis['data_summary'].get('key_delta_strike'),
+            'NEG': analysis['data_summary'].get('neg', 0),
+            'NED': analysis['data_summary'].get('ned', 0),
+            'Dist_to_CW': analysis['data_summary'].get('dist_to_cw'),
+            'Dist_to_PW': analysis['data_summary'].get('dist_to_pw'),
+            'Next Exp Call Vol': analysis['data_summary'].get('next_exp_call_vol'),
+            'Next Exp Put Vol': analysis['data_summary'].get('next_exp_put_vol'),
+            'Delta Ratio': analysis['data_summary'].get('delta_ratio'),
+            'Gamma Ratio': analysis['data_summary'].get('gamma_ratio'),
+            'Options Impact': analysis['data_summary'].get('options_impact'),
+            'DPI': analysis['data_summary'].get('dpi'),
+            'Implied Move': analysis['data_summary'].get('implied_move'),
+            'Position Zone': analysis['position_zone'],
+            'Signal Type': analysis['signal_type'],
+            'Prediction': analysis['prediction'],
+            'MM Behavior': analysis['mm_behavior'],
+            'Logic Chain': analysis['logic_chain'],
+            'Warnings': analysis['warnings'],
             'Pinning Range': f"{put_wall:.0f} - {call_wall:.0f}" if put_wall and call_wall else "N/A"
         })
     
@@ -2101,34 +2228,44 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
     # ========== Tab 3: 周五到期Gamma分析 ==========
     with tab3:
         st.header("📅 周五到期 Gamma 分析")
-        st.caption("分析本周五大量Gamma到期的标的，预测下周一跳空方向")
+        st.caption("分析本周五大量Gamma到期的标的，预测下周一跳空方向（基于做市商解绑效应）")
         
         friday_file = st.file_uploader(
-            "上传 Top Gamma Expiring This Friday CSV",
-            type=['csv'],
+            "上传 Top Gamma Expiring This Friday (CSV/Excel)",
+            type=['csv', 'xlsx', 'xls'],
             key='friday_expiry_upload'
         )
         
         if friday_file is not None:
             try:
-                friday_df = pd.read_csv(friday_file)
+                # 支持CSV和Excel
+                if friday_file.name.endswith('.csv'):
+                    friday_df = pd.read_csv(friday_file)
+                else:
+                    friday_df = pd.read_excel(friday_file)
+                
                 friday_df = friday_df.dropna(subset=['Symbol'])
                 
                 st.success(f"✅ 已加载 {len(friday_df)} 只标的")
                 
-                # 分析
-                friday_results = analyze_friday_expiry(friday_df)
+                # 显示可用字段
+                with st.expander("📋 检测到的数据字段"):
+                    st.write(friday_df.columns.tolist())
+                
+                # 分析 - 使用V2函数
+                friday_results = analyze_friday_expiry_v2(friday_df)
                 
                 if not friday_results.empty:
                     # 统计
                     st.subheader("📊 做市商解绑信号概览")
-                    st.caption("基于MM Unwinding效应：高浓度+关键位置+Delta方向")
+                    st.caption("核心逻辑：周五期权到期 → MM对冲头寸变成裸头寸 → 周一平仓产生买/卖压")
                     
                     strong_bearish = len(friday_results[friday_results['Signal Type'] == 'strong_bearish'])
                     bearish = len(friday_results[friday_results['Signal Type'] == 'bearish'])
                     strong_bullish = len(friday_results[friday_results['Signal Type'] == 'strong_bullish'])
                     bullish = len(friday_results[friday_results['Signal Type'] == 'bullish'])
                     weak_count = len(friday_results[friday_results['Signal Type'] == 'weak'])
+                    neutral_count = len(friday_results[friday_results['Signal Type'] == 'neutral'])
                     
                     col1, col2, col3, col4, col5 = st.columns(5)
                     with col1:
@@ -2136,77 +2273,129 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                     with col2:
                         st.metric("💀 低开信号", strong_bearish + bearish, f"强{strong_bearish} 弱{bearish}")
                     with col3:
-                        st.metric("⚪ 弱信号", weak_count, "NEG<25%")
+                        st.metric("⚖️ 中性", neutral_count)
                     with col4:
-                        high_neg = len(friday_results[friday_results['NEG'] >= 35])
-                        st.metric("⭐ 高浓度", high_neg, "NEG≥35%")
+                        st.metric("⚪ 弱信号", weak_count, "NEG<25%")
                     with col5:
                         st.metric("📊 总计", len(friday_results))
                     
                     st.divider()
                     
-                    # 强信号标的
-                    st.subheader("🎯 强信号标的 (NEG≥25%)")
+                    # 强信号标的 - 显示详细逻辑链
+                    st.subheader("🎯 信号标的详细分析")
                     
-                    strong_signals = friday_results[
-                        (friday_results['NEG'] >= 25) & 
-                        (friday_results['Signal Type'].isin(['strong_bearish', 'bearish', 'strong_bullish', 'bullish']))
+                    # 筛选有信号的标的
+                    signal_results = friday_results[
+                        friday_results['Signal Type'].isin(['strong_bearish', 'bearish', 'strong_bullish', 'bullish'])
                     ].sort_values('NEG', ascending=False)
                     
-                    if not strong_signals.empty:
-                        for _, row in strong_signals.iterrows():
+                    if not signal_results.empty:
+                        for idx, row in signal_results.iterrows():
                             sig_type = row.get('Signal Type', 'neutral')
                             
-                            # 信号图标
+                            # 信号样式
                             if sig_type == 'strong_bearish':
-                                sig_icon = "💀"
-                                sig_color = "error"
+                                sig_icon = "💀💀"
+                                border_color = "#ff4b4b"
                             elif sig_type == 'bearish':
                                 sig_icon = "📉"
-                                sig_color = "warning"
+                                border_color = "#ffa500"
                             elif sig_type == 'strong_bullish':
-                                sig_icon = "🚀"
-                                sig_color = "success"
+                                sig_icon = "🚀🚀"
+                                border_color = "#00cc00"
                             elif sig_type == 'bullish':
                                 sig_icon = "📈"
-                                sig_color = "info"
+                                border_color = "#00aaff"
                             else:
                                 sig_icon = "⚖️"
-                                sig_color = "info"
+                                border_color = "#888888"
                             
+                            # 标的卡片
                             with st.container():
-                                col1, col2 = st.columns([1, 2])
-                                with col1:
-                                    price_str = f"${row['Current Price']:.2f}" if row['Current Price'] else "N/A"
-                                    st.markdown(f"**{row['Symbol']}** {price_str}")
-                                    st.caption(f"NEG: {row['NEG']:.1f}% {row['NEG Stars']}")
-                                    
-                                    # 显示偏离度
-                                    if row.get('Dist_to_CW') is not None:
-                                        st.caption(f"距CW: {row['Dist_to_CW']:+.2f}%")
-                                    if row.get('Dist_to_PW') is not None:
-                                        st.caption(f"距PW: {row['Dist_to_PW']:+.2f}%")
+                                st.markdown(f"""
+                                <div style="border-left: 4px solid {border_color}; padding-left: 15px; margin-bottom: 10px;">
+                                <h4>{sig_icon} {row['Symbol']} - {row['Prediction']}</h4>
+                                </div>
+                                """, unsafe_allow_html=True)
                                 
-                                with col2:
-                                    st.markdown(f"{sig_icon} **{row['Prediction']}**")
-                                    
-                                    # 显示Next Exp Delta
-                                    if row.get('Next Exp Delta') is not None:
-                                        delta_val = row['Next Exp Delta']
-                                        delta_desc = "MM持多头" if delta_val > 0 else "MM持空头"
-                                        st.write(f"Next Exp Delta: {delta_val:.2f} ({delta_desc})")
-                                    
-                                    st.write(f"Pinning区间: {row['Pinning Range']}")
-                                    st.caption(f"判定逻辑: {row['Logic']}")
+                                # 基本信息
+                                info_col1, info_col2, info_col3, info_col4 = st.columns(4)
+                                with info_col1:
+                                    st.metric("当前价", f"${row['Current Price']:.2f}" if row['Current Price'] else "N/A")
+                                with info_col2:
+                                    st.metric("Call Wall", f"${row['Call Wall']:.2f}" if row['Call Wall'] else "N/A")
+                                with info_col3:
+                                    st.metric("Put Wall", f"${row['Put Wall']:.2f}" if row['Put Wall'] else "N/A")
+                                with info_col4:
+                                    st.metric("NEG", f"{row['NEG']:.1f}%")
+                                
+                                # 位置信息
+                                pos_col1, pos_col2, pos_col3, pos_col4 = st.columns(4)
+                                with pos_col1:
+                                    dist_cw = row.get('Dist_to_CW')
+                                    if dist_cw is not None:
+                                        st.metric("距Call Wall", f"{dist_cw:+.2f}%")
+                                with pos_col2:
+                                    dist_pw = row.get('Dist_to_PW')
+                                    if dist_pw is not None:
+                                        st.metric("距Put Wall", f"{dist_pw:+.2f}%")
+                                with pos_col3:
+                                    call_vol = row.get('Next Exp Call Vol')
+                                    if call_vol is not None:
+                                        st.metric("Call到期量", f"{call_vol:.1%}")
+                                with pos_col4:
+                                    put_vol = row.get('Next Exp Put Vol')
+                                    if put_vol is not None:
+                                        st.metric("Put到期量", f"{put_vol:.1%}")
+                                
+                                # MM行为简述
+                                mm_behavior = row.get('MM Behavior', '')
+                                if mm_behavior:
+                                    st.info(f"**做市商行为**: {mm_behavior}")
+                                
+                                # 详细逻辑链
+                                logic_chain = row.get('Logic Chain', [])
+                                if logic_chain:
+                                    with st.expander("🔍 查看详细分析逻辑", expanded=True):
+                                        for line in logic_chain:
+                                            if line.strip():
+                                                st.markdown(line)
+                                
+                                # 警告
+                                warnings = row.get('Warnings', [])
+                                if warnings:
+                                    for warning in warnings:
+                                        st.warning(warning)
+                                
+                                # 其他指标
+                                with st.expander("📊 其他指标"):
+                                    other_col1, other_col2, other_col3, other_col4 = st.columns(4)
+                                    with other_col1:
+                                        oi = row.get('Options Impact')
+                                        if oi:
+                                            st.metric("Options Impact", f"{oi:.1f}%")
+                                    with other_col2:
+                                        dpi = row.get('DPI')
+                                        if dpi:
+                                            st.metric("DPI", f"{dpi:.1f}%")
+                                    with other_col3:
+                                        im = row.get('Implied Move')
+                                        if im:
+                                            st.metric("Implied Move", f"${im:.2f}")
+                                    with other_col4:
+                                        kds = row.get('Key Delta Strike')
+                                        if kds:
+                                            st.metric("Key Delta Strike", f"${kds:.0f}")
+                                
                                 st.divider()
                     else:
-                        st.info("暂无强信号标的 (NEG≥25% 且有方向信号)")
+                        st.info("暂无有效信号标的（价格未接近关键位或浓度不足）")
                     
                     # 完整表格
                     with st.expander("📋 查看完整分析表"):
-                        display_cols = ['Symbol', 'Current Price', 'NEG', 'NEG Stars', 
-                                       'Dist_to_CW', 'Dist_to_PW', 'Next Exp Delta',
-                                       'Signal Type', 'Prediction', 'Logic']
+                        display_cols = ['Symbol', 'Current Price', 'Call Wall', 'Put Wall', 
+                                       'NEG', 'NED', 'Dist_to_CW', 'Dist_to_PW',
+                                       'Position Zone', 'Signal Type', 'Prediction', 'MM Behavior']
                         available_cols = [c for c in display_cols if c in friday_results.columns]
                         st.dataframe(friday_results[available_cols].round(2), use_container_width=True, hide_index=True)
                     
@@ -2222,11 +2411,10 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                     with col1:
                         if st.button("➕ 添加到追踪", key="add_fe_tracking"):
                             new_count = 0
-                            updated_count = 0
                             
                             # 只添加有方向信号的标的
                             valid_signals = friday_results[
-                                friday_results['Signal Type'].isin(['strong_bearish', 'bearish', 'strong_bullish', 'bullish', 'bearish_watch', 'bullish_watch'])
+                                friday_results['Signal Type'].isin(['strong_bearish', 'bearish', 'strong_bullish', 'bullish'])
                             ]
                             
                             for _, row in valid_signals.iterrows():
@@ -2245,12 +2433,14 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                         'call_wall': float(row['Call Wall']) if row['Call Wall'] else 0,
                                         'put_wall': float(row['Put Wall']) if row['Put Wall'] else 0,
                                         'neg': row['NEG'],
+                                        'ned': row.get('NED'),
                                         'dist_to_cw': row.get('Dist_to_CW'),
                                         'dist_to_pw': row.get('Dist_to_PW'),
-                                        'next_exp_delta': row.get('Next Exp Delta'),
+                                        'position_zone': row.get('Position Zone'),
                                         'signal_type': row['Signal Type'],
                                         'prediction': row['Prediction'],
-                                        'logic': row['Logic'],
+                                        'mm_behavior': row.get('MM Behavior', ''),
+                                        'logic_chain': row.get('Logic Chain', []),
                                         'monday_open': None,  # 周一手动填入
                                         'tuesday_close': None,  # 周二手动填入
                                         'gap_pct': None,  # 跳空百分比
@@ -2261,8 +2451,6 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                         'status': 'tracking'
                                     }
                                     new_count += 1
-                                else:
-                                    updated_count += 1
                             
                             if new_count > 0:
                                 save_worksheet_data("Friday_Expiry", fe_tracking)
