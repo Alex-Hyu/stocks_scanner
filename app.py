@@ -2277,6 +2277,368 @@ def analyze_friday_expiry_v3(df):
 
 
 # ============================================================
+# 日内多空预测引擎
+# ============================================================
+
+def analyze_intraday_signal(row):
+    """
+    分析单个标的的日内多空信号
+    
+    使用四维指标 + Gamma环境 + 关键位置
+    预测日内走势方向和幅度
+    """
+    # ========== 提取数据 ==========
+    ticker = row.get('Ticker', row.get('Symbol', ''))
+    cp = parse_number_safe(row.get('Current Price'))
+    call_wall = parse_number_safe(row.get('Call Wall'))
+    put_wall = parse_number_safe(row.get('Put Wall'))
+    hedge_wall = parse_number_safe(row.get('Hedge Wall'))
+    key_gamma_strike = parse_number_safe(row.get('Key Gamma Strike'))
+    
+    # 四维指标
+    delta_ratio_raw = row.get('Delta Ratio')
+    delta_ratio = -1.0
+    if delta_ratio_raw:
+        try:
+            delta_ratio = float(str(delta_ratio_raw).replace("'", ""))
+        except:
+            delta_ratio = -1.0
+    
+    gamma_ratio = parse_number_safe(row.get('Gamma Ratio'))
+    volume_ratio = parse_number_safe(row.get('Volume Ratio')) or 1.0
+    next_exp_call = parse_number_safe(row.get('Next Exp Call Vol')) or 0
+    next_exp_put = parse_number_safe(row.get('Next Exp Put Vol')) or 0
+    
+    # 其他指标
+    dpi = parse_number_safe(row.get('5 day DPI')) or parse_number_safe(row.get('DPI')) or 50
+    options_impact = parse_number_safe(row.get('Options Impact')) or 0
+    implied_move = parse_number_safe(row.get('Options Implied Move'))
+    iv_rank = parse_number_safe(row.get('IV Rank'))
+    
+    # ========== 构建结果 ==========
+    result = {
+        'ticker': ticker,
+        'current_price': cp,
+        'call_wall': call_wall,
+        'put_wall': put_wall,
+        'hedge_wall': hedge_wall,
+        'delta_ratio': delta_ratio,
+        'gamma_ratio': gamma_ratio,
+        'volume_ratio': volume_ratio,
+        'dpi': dpi,
+        'options_impact': options_impact,
+        'call_score': 0,
+        'put_score': 0,
+        'gamma_env': 'unknown',
+        'position_zone': 'unknown',
+        'dist_to_cw': None,
+        'dist_to_pw': None,
+        'direction': 0,  # -2强空, -1偏空, 0中性, 1偏多, 2强多
+        'action': 'WATCH',
+        'expected_range': '',
+        'confidence': 'Medium',
+        'logic': [],
+        'call_reasons': [],
+        'put_reasons': []
+    }
+    
+    if cp is None or call_wall is None or put_wall is None:
+        result['action'] = 'NO DATA'
+        result['logic'].append("数据不完整")
+        return result
+    
+    # ========== 1. 四维评分 ==========
+    call_score = 0
+    call_reasons = []
+    put_score = 0
+    put_reasons = []
+    
+    # 维度1: Delta Ratio（库存）
+    if delta_ratio > -1.0:
+        call_score += 3
+        call_reasons.append(f"Delta Ratio {delta_ratio:.2f} > -1.0（Call库存重）")
+    elif delta_ratio > -1.5:
+        call_score += 2
+        call_reasons.append(f"Delta Ratio {delta_ratio:.2f} > -1.5")
+    
+    if delta_ratio < -2.5:
+        put_score += 3
+        put_reasons.append(f"Delta Ratio {delta_ratio:.2f} < -2.5（Put库存重）")
+    elif delta_ratio < -1.5:
+        put_score += 2
+        put_reasons.append(f"Delta Ratio {delta_ratio:.2f} < -1.5")
+    
+    # 维度2: Gamma Ratio（敏感度）
+    if gamma_ratio is not None:
+        if gamma_ratio < 0.8:
+            call_score += 3
+            call_reasons.append(f"Gamma Ratio {gamma_ratio:.2f} < 0.8（Call Gamma主导）")
+        elif gamma_ratio < 1.0:
+            call_score += 1
+            call_reasons.append(f"Gamma Ratio {gamma_ratio:.2f} < 1.0")
+        
+        if gamma_ratio > 1.5:
+            put_score += 3
+            put_reasons.append(f"Gamma Ratio {gamma_ratio:.2f} > 1.5（Put Gamma主导）")
+        elif gamma_ratio > 1.2:
+            put_score += 2
+            put_reasons.append(f"Gamma Ratio {gamma_ratio:.2f} > 1.2")
+        elif gamma_ratio > 1.0:
+            put_score += 1
+            put_reasons.append(f"Gamma Ratio {gamma_ratio:.2f} > 1.0")
+    
+    # 维度3: Volume Ratio（流向）
+    if volume_ratio < 0.8:
+        call_score += 3
+        call_reasons.append(f"Volume Ratio {volume_ratio:.2f} < 0.8（ATM Call活跃）")
+    elif volume_ratio < 1.0:
+        call_score += 1
+        call_reasons.append(f"Volume Ratio {volume_ratio:.2f} < 1.0")
+    
+    if volume_ratio > 1.5:
+        put_score += 3
+        put_reasons.append(f"Volume Ratio {volume_ratio:.2f} > 1.5（ATM Put活跃）")
+    elif volume_ratio > 1.2:
+        put_score += 2
+        put_reasons.append(f"Volume Ratio {volume_ratio:.2f} > 1.2")
+    elif volume_ratio > 1.0:
+        put_score += 1
+        put_reasons.append(f"Volume Ratio {volume_ratio:.2f} > 1.0")
+    
+    # 维度4: Next Exp Vol（能量）
+    if next_exp_call > next_exp_put * 1.3 and next_exp_call > 0.25:
+        call_score += 2
+        call_reasons.append(f"Call到期量 {next_exp_call:.1%} > Put")
+    elif next_exp_call > 0.35:
+        call_score += 2
+        call_reasons.append(f"Call到期量 {next_exp_call:.1%} > 35%")
+    elif next_exp_call > 0.25:
+        call_score += 1
+    
+    if next_exp_put > next_exp_call * 1.3 and next_exp_put > 0.25:
+        put_score += 2
+        put_reasons.append(f"Put到期量 {next_exp_put:.1%} > Call")
+    elif next_exp_put > 0.35:
+        put_score += 2
+        put_reasons.append(f"Put到期量 {next_exp_put:.1%} > 35%")
+    elif next_exp_put > 0.25:
+        put_score += 1
+    
+    result['call_score'] = call_score
+    result['put_score'] = put_score
+    result['call_reasons'] = call_reasons
+    result['put_reasons'] = put_reasons
+    
+    # ========== 2. Gamma环境判断 ==========
+    gamma_env = "unknown"
+    gamma_desc = ""
+    
+    if hedge_wall and cp:
+        if cp > hedge_wall * 1.005:
+            gamma_env = "positive"
+            gamma_desc = f"价格${cp:.2f} > Hedge Wall${hedge_wall:.2f} → 正Gamma（均值回归）"
+        elif cp < hedge_wall * 0.995:
+            gamma_env = "negative"
+            gamma_desc = f"价格${cp:.2f} < Hedge Wall${hedge_wall:.2f} → 负Gamma（趋势延续）"
+        else:
+            gamma_env = "neutral"
+            gamma_desc = f"价格${cp:.2f} ≈ Hedge Wall${hedge_wall:.2f} → Gamma中性"
+    
+    result['gamma_env'] = gamma_env
+    
+    # ========== 3. 位置区域判断 ==========
+    dist_to_cw = (cp - call_wall) / call_wall * 100
+    dist_to_pw = (cp - put_wall) / put_wall * 100
+    
+    result['dist_to_cw'] = dist_to_cw
+    result['dist_to_pw'] = dist_to_pw
+    
+    if dist_to_cw > 2:
+        position_zone = "far_above_cw"
+    elif dist_to_cw > 0:
+        position_zone = "above_cw"
+    elif dist_to_cw > -1.5:
+        position_zone = "near_cw"
+    elif dist_to_pw < -2:
+        position_zone = "far_below_pw"
+    elif dist_to_pw < 0:
+        position_zone = "below_pw"
+    elif dist_to_pw < 1.5:
+        position_zone = "near_pw"
+    else:
+        position_zone = "middle"
+    
+    result['position_zone'] = position_zone
+    
+    # ========== 4. DPI确认 ==========
+    dpi_bullish = dpi > 52
+    dpi_bearish = dpi < 48
+    
+    # ========== 5. 信号生成 ==========
+    action = "WATCH"
+    direction = 0
+    logic = []
+    
+    # --- 场景1: 突破Call Wall ---
+    if position_zone in ["above_cw", "far_above_cw"]:
+        if gamma_env == "negative":
+            action = "STRONG BULLISH 🚀🚀"
+            direction = 2
+            logic.append("✅ 突破Call Wall + 负Gamma环境")
+            logic.append("→ MM被迫追涨买入，趋势可能延续")
+        else:
+            action = "FADE SHORT 📉"
+            direction = -1
+            logic.append("⚠️ 突破Call Wall但正Gamma环境")
+            logic.append("→ MM卖高买低，预期冲高回落至Call Wall")
+    
+    # --- 场景2: 跌破Put Wall ---
+    elif position_zone in ["below_pw", "far_below_pw"]:
+        if gamma_env == "negative":
+            action = "STRONG BEARISH 💀💀"
+            direction = -2
+            logic.append("✅ 跌破Put Wall + 负Gamma环境")
+            logic.append("→ MM被迫追跌卖出，趋势可能延续")
+        else:
+            action = "BOUNCE LONG 📈"
+            direction = 1
+            logic.append("✅ 跌破Put Wall但正Gamma环境")
+            logic.append("→ MM逢低买入，预期探底回升")
+            if dpi_bullish:
+                logic.append(f"✅ DPI={dpi:.1f}%确认机构买入")
+                direction = 2
+                action = "STRONG BULLISH 🚀🚀"
+    
+    # --- 场景3: 接近Call Wall ---
+    elif position_zone == "near_cw":
+        if call_score >= 6:
+            action = "BEARISH (Call Pin) 💀"
+            direction = -1
+            logic.append(f"✅ Call主导({call_score}/11分) + 接近Call Wall")
+            logic.append("→ 大量Call头寸形成阻力，预期被压制")
+            if dpi_bearish:
+                logic.append(f"✅ DPI={dpi:.1f}%确认机构卖出")
+        elif call_score >= 4:
+            action = "WATCH BEARISH 📉"
+            direction = -1
+            logic.append(f"⚠️ 偏Call主导({call_score}/11分) + 接近Call Wall")
+            logic.append("→ 观察是否被压制")
+        else:
+            action = "WATCH ⚖️"
+            logic.append("接近Call Wall但无明确主导")
+    
+    # --- 场景4: 接近Put Wall ---
+    elif position_zone == "near_pw":
+        if put_score >= 6:
+            if dpi_bullish:
+                action = "BULLISH (Support) 🚀"
+                direction = 1
+                logic.append(f"✅ Put主导({put_score}/11分) + 接近Put Wall + DPI确认")
+                logic.append("→ Put头寸形成支撑，预期反弹")
+            else:
+                action = "WATCH BULLISH 📈"
+                direction = 1
+                logic.append(f"⚠️ Put主导({put_score}/11分) + 接近Put Wall")
+                logic.append(f"→ 但DPI={dpi:.1f}%未确认，谨慎做多")
+        elif put_score >= 4:
+            action = "WATCH BULLISH 📈"
+            direction = 1
+            logic.append(f"⚠️ 偏Put主导({put_score}/11分) + 接近Put Wall")
+        else:
+            action = "WATCH ⚖️"
+            logic.append("接近Put Wall但无明确主导")
+    
+    # --- 场景5: 中间区域 ---
+    else:
+        if call_score >= 7 and call_score > put_score + 3:
+            action = "LEAN BEARISH 📉"
+            direction = -1
+            logic.append(f"Call强主导({call_score}/11分)，中间区域")
+            logic.append("→ 观察是否向Call Wall移动")
+        elif put_score >= 7 and put_score > call_score + 3:
+            action = "LEAN BULLISH 📈"
+            direction = 1
+            logic.append(f"Put强主导({put_score}/11分)，中间区域")
+            logic.append("→ 观察是否向Put Wall移动")
+        else:
+            action = "NEUTRAL ⚖️"
+            direction = 0
+            logic.append(f"中间区域，Call({call_score}分) vs Put({put_score}分)")
+            logic.append("→ 无明确方向，观望")
+    
+    # --- Gamma环境补充说明 ---
+    if gamma_desc:
+        logic.append(gamma_desc)
+    
+    # ========== 6. 预期波动范围 ==========
+    if implied_move:
+        expected_range = f"±${implied_move:.2f}"
+    else:
+        if gamma_env == "positive":
+            pct = 1.5
+        elif gamma_env == "negative":
+            pct = 3.0
+        else:
+            pct = 2.0
+        expected_range = f"±{pct:.1f}%（约${cp * pct / 100:.2f}）"
+    
+    result['expected_range'] = expected_range
+    
+    # ========== 7. 信号可信度 ==========
+    confidence = "Medium"
+    if options_impact > 30 and abs(direction) >= 1:
+        confidence = "High"
+        logic.append(f"📊 Options Impact={options_impact:.1f}%，期权主导，信号可信")
+    elif options_impact < 15:
+        confidence = "Low"
+        logic.append(f"⚠️ Options Impact={options_impact:.1f}%偏低，基本面可能主导")
+    
+    result['direction'] = direction
+    result['action'] = action
+    result['confidence'] = confidence
+    result['logic'] = logic
+    
+    return result
+
+
+def analyze_intraday_batch(df):
+    """
+    批量分析日内多空信号
+    """
+    results = []
+    
+    for _, row in df.iterrows():
+        result = analyze_intraday_signal(row)
+        results.append({
+            'Ticker': result['ticker'],
+            'Current Price': result['current_price'],
+            'Call Wall': result['call_wall'],
+            'Put Wall': result['put_wall'],
+            'Hedge Wall': result['hedge_wall'],
+            'Dist to CW': result['dist_to_cw'],
+            'Dist to PW': result['dist_to_pw'],
+            'Position Zone': result['position_zone'],
+            'Gamma Env': result['gamma_env'],
+            'Delta Ratio': result['delta_ratio'],
+            'Gamma Ratio': result['gamma_ratio'],
+            'Volume Ratio': result['volume_ratio'],
+            'Call Score': result['call_score'],
+            'Put Score': result['put_score'],
+            'DPI': result['dpi'],
+            'Options Impact': result['options_impact'],
+            'Direction': result['direction'],
+            'Action': result['action'],
+            'Expected Range': result['expected_range'],
+            'Confidence': result['confidence'],
+            'Logic': result['logic'],
+            'Call Reasons': result['call_reasons'],
+            'Put Reasons': result['put_reasons']
+        })
+    
+    return pd.DataFrame(results)
+
+
+# ============================================================
 # Streamlit 界面
 # ============================================================
 
@@ -2284,10 +2646,11 @@ def main():
     st.title("🎯 股票波段期权筛选系统")
     st.caption(f"更新时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
         "📈 QQQ/NQ分析", 
         "📊 Equity Hub", 
         "📅 周五到期Gamma",
+        "🎯 日内多空预测",
         "📊 板块资金流", 
         "🔍 个股筛选", 
         "🎯 综合名单"
@@ -3255,8 +3618,298 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
         else:
             st.info("👆 请上传 Top Gamma Expiring This Friday CSV文件")
     
-    # ========== Tab 4: 板块资金流 ==========
+    # ========== Tab 4: 日内多空预测 ==========
     with tab4:
+        st.header("🎯 日内多空预测")
+        st.caption("基于SpotGamma四维指标 + Gamma环境 + 关键位置，预测今日走势方向")
+        
+        # 说明框
+        with st.expander("📖 预测逻辑说明", expanded=False):
+            st.markdown("""
+            ### 四维评分模型（满分11分）
+            | 维度 | 指标 | Call主导（看空） | Put主导（看多） |
+            |------|------|-----------------|-----------------|
+            | 库存 | Delta Ratio | > -1.0 (+3分) | < -2.5 (+3分) |
+            | 敏感度 | Gamma Ratio | < 0.8 (+3分) | > 1.5 (+3分) |
+            | 流向 | Volume Ratio | < 0.8 (+3分) | > 1.5 (+3分) |
+            | 能量 | Next Exp Vol | Call > Put (+2分) | Put > Call (+2分) |
+            
+            ### Gamma环境
+            - **正Gamma**（价格 > Hedge Wall）：MM卖高买低 → 均值回归，波动被抑制
+            - **负Gamma**（价格 < Hedge Wall）：MM追涨杀跌 → 趋势延续，波动放大
+            
+            ### 关键信号场景
+            | 场景 | 条件 | 预测 |
+            |------|------|------|
+            | 🚀🚀 突破CW+负Gamma | 价格>Call Wall + 负Gamma | 强势上涨延续 |
+            | 📉 突破CW+正Gamma | 价格>Call Wall + 正Gamma | 冲高回落 |
+            | 💀💀 跌破PW+负Gamma | 价格<Put Wall + 负Gamma | 强势下跌延续 |
+            | 📈 跌破PW+正Gamma | 价格<Put Wall + 正Gamma | 探底回升 |
+            | 💀 Call Pin | Call主导≥6分 + 接近CW | 被阻力压制 |
+            | 🚀 Put Support | Put主导≥6分 + 接近PW | 获支撑反弹 |
+            """)
+        
+        # 上传CSV
+        intraday_file = st.file_uploader(
+            "上传SpotGamma Equity Hub CSV",
+            type=['csv', 'xlsx'],
+            key='intraday_upload',
+            help="使用与周五到期Gamma相同的数据文件"
+        )
+        
+        if intraday_file:
+            try:
+                # 读取数据
+                if intraday_file.name.endswith('.xlsx'):
+                    intraday_df = pd.read_excel(intraday_file)
+                else:
+                    intraday_df = pd.read_csv(intraday_file)
+                
+                # 标准化列名
+                intraday_df = standardize_column_names(intraday_df)
+                
+                st.success(f"✅ 已加载 {len(intraday_df)} 只标的")
+                
+                # 分析
+                intraday_results = analyze_intraday_batch(intraday_df)
+                
+                if not intraday_results.empty:
+                    # ========== Top 5 排行榜 ==========
+                    st.subheader("🏆 今日多空信号排行榜")
+                    
+                    rank_col1, rank_col2 = st.columns(2)
+                    
+                    # Top 5 多头
+                    with rank_col1:
+                        st.markdown("### 🚀 多头信号 Top 5")
+                        st.caption("方向分数 > 0，按Put评分排序")
+                        
+                        bullish = intraday_results[
+                            intraday_results['Direction'] > 0
+                        ].nlargest(5, ['Direction', 'Put Score'])
+                        
+                        if not bullish.empty:
+                            for idx, (_, row) in enumerate(bullish.iterrows(), 1):
+                                dir_val = row['Direction']
+                                strength = "🚀🚀" if dir_val >= 2 else "🚀"
+                                conf = row['Confidence']
+                                conf_color = "🟢" if conf == "High" else ("🟡" if conf == "Medium" else "🔴")
+                                
+                                st.markdown(f"""
+                                **{idx}. {row['Ticker']}** {strength} {conf_color}
+                                - **{row['Action']}**
+                                - 价格: ${row['Current Price']:.2f} | Put Wall: ${row['Put Wall']:.2f}
+                                - Put评分: {row['Put Score']}/11 | DPI: {row['DPI']:.1f}%
+                                - Gamma: {row['Gamma Env']} | 预期: {row['Expected Range']}
+                                """)
+                        else:
+                            st.info("暂无多头信号")
+                    
+                    # Top 5 空头
+                    with rank_col2:
+                        st.markdown("### 💀 空头信号 Top 5")
+                        st.caption("方向分数 < 0，按Call评分排序")
+                        
+                        bearish = intraday_results[
+                            intraday_results['Direction'] < 0
+                        ].nsmallest(5, ['Direction'])
+                        
+                        if not bearish.empty:
+                            for idx, (_, row) in enumerate(bearish.iterrows(), 1):
+                                dir_val = row['Direction']
+                                strength = "💀💀" if dir_val <= -2 else "💀"
+                                conf = row['Confidence']
+                                conf_color = "🟢" if conf == "High" else ("🟡" if conf == "Medium" else "🔴")
+                                
+                                st.markdown(f"""
+                                **{idx}. {row['Ticker']}** {strength} {conf_color}
+                                - **{row['Action']}**
+                                - 价格: ${row['Current Price']:.2f} | Call Wall: ${row['Call Wall']:.2f}
+                                - Call评分: {row['Call Score']}/11 | DPI: {row['DPI']:.1f}%
+                                - Gamma: {row['Gamma Env']} | 预期: {row['Expected Range']}
+                                """)
+                        else:
+                            st.info("暂无空头信号")
+                    
+                    st.divider()
+                    
+                    # ========== 统计概览 ==========
+                    st.subheader("📊 信号统计")
+                    
+                    strong_bullish = len(intraday_results[intraday_results['Direction'] >= 2])
+                    bullish_count = len(intraday_results[intraday_results['Direction'] == 1])
+                    neutral = len(intraday_results[intraday_results['Direction'] == 0])
+                    bearish_count = len(intraday_results[intraday_results['Direction'] == -1])
+                    strong_bearish = len(intraday_results[intraday_results['Direction'] <= -2])
+                    
+                    stat_cols = st.columns(5)
+                    with stat_cols[0]:
+                        st.metric("🚀🚀 强多", strong_bullish)
+                    with stat_cols[1]:
+                        st.metric("🚀 偏多", bullish_count)
+                    with stat_cols[2]:
+                        st.metric("⚖️ 中性", neutral)
+                    with stat_cols[3]:
+                        st.metric("💀 偏空", bearish_count)
+                    with stat_cols[4]:
+                        st.metric("💀💀 强空", strong_bearish)
+                    
+                    st.divider()
+                    
+                    # ========== 详细信号列表 ==========
+                    st.subheader("🎯 详细信号列表")
+                    
+                    # 筛选器
+                    filter_col1, filter_col2, filter_col3 = st.columns(3)
+                    with filter_col1:
+                        direction_filter = st.selectbox(
+                            "方向筛选",
+                            ["全部", "多头 (Direction > 0)", "空头 (Direction < 0)", "强信号 (|Direction| >= 2)"],
+                            key="intraday_dir_filter"
+                        )
+                    with filter_col2:
+                        confidence_filter = st.selectbox(
+                            "可信度筛选",
+                            ["全部", "High", "Medium", "Low"],
+                            key="intraday_conf_filter"
+                        )
+                    with filter_col3:
+                        gamma_filter = st.selectbox(
+                            "Gamma环境",
+                            ["全部", "positive", "negative", "neutral"],
+                            key="intraday_gamma_filter"
+                        )
+                    
+                    # 应用筛选
+                    filtered_results = intraday_results.copy()
+                    
+                    if direction_filter == "多头 (Direction > 0)":
+                        filtered_results = filtered_results[filtered_results['Direction'] > 0]
+                    elif direction_filter == "空头 (Direction < 0)":
+                        filtered_results = filtered_results[filtered_results['Direction'] < 0]
+                    elif direction_filter == "强信号 (|Direction| >= 2)":
+                        filtered_results = filtered_results[abs(filtered_results['Direction']) >= 2]
+                    
+                    if confidence_filter != "全部":
+                        filtered_results = filtered_results[filtered_results['Confidence'] == confidence_filter]
+                    
+                    if gamma_filter != "全部":
+                        filtered_results = filtered_results[filtered_results['Gamma Env'] == gamma_filter]
+                    
+                    st.caption(f"显示 {len(filtered_results)} / {len(intraday_results)} 个标的")
+                    
+                    # 显示详细信号
+                    if not filtered_results.empty:
+                        for _, row in filtered_results.iterrows():
+                            dir_val = row['Direction']
+                            
+                            # 确定边框颜色
+                            if dir_val >= 2:
+                                border_color = "#00cc00"
+                                icon = "🚀🚀"
+                            elif dir_val == 1:
+                                border_color = "#00aaff"
+                                icon = "🚀"
+                            elif dir_val == -1:
+                                border_color = "#ffa500"
+                                icon = "💀"
+                            elif dir_val <= -2:
+                                border_color = "#ff4b4b"
+                                icon = "💀💀"
+                            else:
+                                border_color = "#888888"
+                                icon = "⚖️"
+                            
+                            with st.container():
+                                st.markdown(f"""
+                                <div style="border-left: 4px solid {border_color}; padding-left: 15px; margin-bottom: 10px;">
+                                <h4>{icon} {row['Ticker']} - {row['Action']}</h4>
+                                </div>
+                                """, unsafe_allow_html=True)
+                                
+                                # 核心信息
+                                info_cols = st.columns(6)
+                                with info_cols[0]:
+                                    st.metric("当前价", f"${row['Current Price']:.2f}" if row['Current Price'] else "N/A")
+                                with info_cols[1]:
+                                    st.metric("Call Wall", f"${row['Call Wall']:.2f}" if row['Call Wall'] else "N/A")
+                                with info_cols[2]:
+                                    st.metric("Put Wall", f"${row['Put Wall']:.2f}" if row['Put Wall'] else "N/A")
+                                with info_cols[3]:
+                                    st.metric("Gamma环境", row['Gamma Env'])
+                                with info_cols[4]:
+                                    st.metric("预期波动", row['Expected Range'])
+                                with info_cols[5]:
+                                    st.metric("可信度", row['Confidence'])
+                                
+                                # 四维评分
+                                score_cols = st.columns(4)
+                                with score_cols[0]:
+                                    st.metric("Call评分", f"{row['Call Score']}/11")
+                                with score_cols[1]:
+                                    st.metric("Put评分", f"{row['Put Score']}/11")
+                                with score_cols[2]:
+                                    st.metric("DPI", f"{row['DPI']:.1f}%")
+                                with score_cols[3]:
+                                    oi = row.get('Options Impact')
+                                    st.metric("Options Impact", f"{oi:.1f}%" if oi else "N/A")
+                                
+                                # 分析逻辑
+                                logic_list = row.get('Logic', [])
+                                if logic_list:
+                                    with st.expander("🔍 分析逻辑"):
+                                        for line in logic_list:
+                                            st.markdown(f"• {line}")
+                                        
+                                        # 显示四维评分详情
+                                        st.markdown("---")
+                                        st.markdown("**四维评分详情：**")
+                                        
+                                        call_reasons = row.get('Call Reasons', [])
+                                        put_reasons = row.get('Put Reasons', [])
+                                        
+                                        if call_reasons:
+                                            st.markdown(f"🔴 Call主导因素:")
+                                            for r in call_reasons:
+                                                st.markdown(f"  • {r}")
+                                        
+                                        if put_reasons:
+                                            st.markdown(f"🟢 Put主导因素:")
+                                            for r in put_reasons:
+                                                st.markdown(f"  • {r}")
+                                
+                                st.markdown("---")
+                    else:
+                        st.info("无符合条件的信号")
+                    
+                    # ========== 导出数据 ==========
+                    st.subheader("📥 导出预测数据")
+                    
+                    # 准备导出数据
+                    export_df = intraday_results[[
+                        'Ticker', 'Current Price', 'Call Wall', 'Put Wall',
+                        'Gamma Env', 'Call Score', 'Put Score', 'Direction',
+                        'Action', 'Expected Range', 'Confidence', 'DPI'
+                    ]].copy()
+                    
+                    csv_data = export_df.to_csv(index=False)
+                    
+                    st.download_button(
+                        label="📥 下载预测CSV",
+                        data=csv_data,
+                        file_name=f"intraday_prediction_{datetime.now().strftime('%Y%m%d')}.csv",
+                        mime="text/csv"
+                    )
+                
+            except Exception as e:
+                st.error(f"❌ 读取失败: {e}")
+                import traceback
+                st.code(traceback.format_exc())
+        else:
+            st.info("👆 请上传SpotGamma Equity Hub CSV文件")
+    
+    # ========== Tab 5: 板块资金流 ==========
+    with tab5:
         st.header("板块资金流扫描")
         st.caption("作为参考信息，辅助判断信号置信度")
         
@@ -3297,8 +3950,8 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
         if 'etf_data' in st.session_state:
             st.success("✅ 板块数据已缓存")
     
-    # ========== Tab 2: 个股筛选 ==========
-    with tab5:
+    # ========== Tab 6: 个股筛选 ==========
+    with tab6:
         st.header("个股技术筛选")
         
         # 股票池选择
@@ -3399,8 +4052,8 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                     if len(failed) > 0:
                         st.dataframe(failed[['ticker', 'reason']], use_container_width=True, hide_index=True)
     
-    # ========== Tab 3: 综合名单 ==========
-    with tab6:
+    # ========== Tab 7: 综合名单 ==========
+    with tab7:
         st.header("综合筛选名单")
         
         if 'stock_results' not in st.session_state:
