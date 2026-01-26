@@ -3665,10 +3665,25 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                 else:
                     intraday_df = pd.read_csv(intraday_file)
                 
-                # 标准化列名
-                intraday_df = standardize_column_names(intraday_df)
+                # 列名映射（兼容不同格式）
+                column_mapping = {
+                    'Symbol': 'Ticker',
+                    'symbol': 'Ticker',
+                    'SYMBOL': 'Ticker',
+                    'ticker': 'Ticker',
+                    'TICKER': 'Ticker'
+                }
+                intraday_df = intraday_df.rename(columns=column_mapping)
+                
+                # 确保有Ticker列
+                if 'Ticker' not in intraday_df.columns and 'Symbol' in intraday_df.columns:
+                    intraday_df['Ticker'] = intraday_df['Symbol']
                 
                 st.success(f"✅ 已加载 {len(intraday_df)} 只标的")
+                
+                # 显示可用字段
+                with st.expander("📋 检测到的数据字段"):
+                    st.write(intraday_df.columns.tolist())
                 
                 # 分析
                 intraday_results = analyze_intraday_batch(intraday_df)
