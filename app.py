@@ -2628,11 +2628,6 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                         st.metric("⚪ 低冲击", low_impact, "浓度不足")
                     with col5:
                         st.metric("📊 总计", len(friday_results))
-                        st.metric("⚖️ 中性", neutral_count)
-                    with col4:
-                        st.metric("⚪ 弱信号", weak_count, "浓度不足")
-                    with col5:
-                        st.metric("📊 总计", len(friday_results))
                     
                     st.divider()
                     
