@@ -2598,13 +2598,103 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                 with st.expander("📋 检测到的数据字段"):
                     st.write(friday_df.columns.tolist())
                 
-                # 分析 - 使用V2函数
+                # 分析 - 使用V3函数
                 friday_results = analyze_friday_expiry_v3(friday_df)
                 
                 if not friday_results.empty:
-                    # 统计
+                    # ========== 🏆 Top 5 排行榜 ==========
+                    st.subheader("🏆 解绑分数排行榜")
+                    st.caption("快速定位：高开分Top5（空头回补买压）vs 低开分Top5（多头平仓卖压）")
+                    
+                    rank_col1, rank_col2 = st.columns(2)
+                    
+                    # 高开分 Top 5
+                    with rank_col1:
+                        st.markdown("### 🚀 高开分 Top 5")
+                        st.caption("Put到期→MM空头回补→周一买压")
+                        
+                        # 筛选有效数据并排序
+                        gap_up_valid = friday_results[
+                            (friday_results['Gap Up Score'] > 0) & 
+                            (friday_results['Signal Type'] != 'low_impact')
+                        ].nlargest(5, 'Gap Up Score')
+                        
+                        if not gap_up_valid.empty:
+                            for idx, (_, row) in enumerate(gap_up_valid.iterrows(), 1):
+                                score = row['Gap Up Score']
+                                # 分数强度颜色
+                                if score > 100:
+                                    color = "🟢🟢🟢"
+                                    strength = "极强"
+                                elif score > 50:
+                                    color = "🟢🟢"
+                                    strength = "强"
+                                elif score > 20:
+                                    color = "🟢"
+                                    strength = "中等"
+                                else:
+                                    color = "⚪"
+                                    strength = "弱"
+                                
+                                # 显示排名卡片
+                                dom = row.get('Dominance', '')
+                                dom_icon = "📈" if 'put' in dom else ("📉" if 'call' in dom else "⚖️")
+                                
+                                st.markdown(f"""
+                                **{idx}. {row['Symbol']}** {color}
+                                - 高开分: **{score:.1f}** ({strength})
+                                - 价格: ${row['Current Price']:.2f} | Put Wall: ${row['Put Wall']:.2f}
+                                - 距PW: {row.get('Dist_to_PW', 0):+.1f}% | 主导: {dom_icon} {dom}
+                                """)
+                        else:
+                            st.info("暂无有效高开信号")
+                    
+                    # 低开分 Top 5
+                    with rank_col2:
+                        st.markdown("### 💀 低开分 Top 5")
+                        st.caption("Call到期→MM多头平仓→周一卖压")
+                        
+                        # 筛选有效数据并排序
+                        gap_down_valid = friday_results[
+                            (friday_results['Gap Down Score'] > 0) & 
+                            (friday_results['Signal Type'] != 'low_impact')
+                        ].nlargest(5, 'Gap Down Score')
+                        
+                        if not gap_down_valid.empty:
+                            for idx, (_, row) in enumerate(gap_down_valid.iterrows(), 1):
+                                score = row['Gap Down Score']
+                                # 分数强度颜色
+                                if score > 100:
+                                    color = "🔴🔴🔴"
+                                    strength = "极强"
+                                elif score > 50:
+                                    color = "🔴🔴"
+                                    strength = "强"
+                                elif score > 20:
+                                    color = "🔴"
+                                    strength = "中等"
+                                else:
+                                    color = "⚪"
+                                    strength = "弱"
+                                
+                                # 显示排名卡片
+                                dom = row.get('Dominance', '')
+                                dom_icon = "📈" if 'put' in dom else ("📉" if 'call' in dom else "⚖️")
+                                
+                                st.markdown(f"""
+                                **{idx}. {row['Symbol']}** {color}
+                                - 低开分: **{score:.1f}** ({strength})
+                                - 价格: ${row['Current Price']:.2f} | Call Wall: ${row['Call Wall']:.2f}
+                                - 距CW: {row.get('Dist_to_CW', 0):+.1f}% | 主导: {dom_icon} {dom}
+                                """)
+                        else:
+                            st.info("暂无有效低开信号")
+                    
+                    st.divider()
+                    
+                    # ========== 统计概览 ==========
                     st.subheader("📊 做市商解绑信号概览（5步分析）")
-                    st.caption("核心逻辑：高冲击判断 → 主导方判断 → 解绑分数 → 位置验证 → 最终信号")
+                    st.caption("核心逻辑：高冲击判断 → 四维主导方 → 解绑分数 → 位置验证 → 最终信号")
                     
                     strong_bearish = len(friday_results[friday_results['Signal Type'] == 'strong_bearish'])
                     bearish = len(friday_results[friday_results['Signal Type'] == 'bearish'])
