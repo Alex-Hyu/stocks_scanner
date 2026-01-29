@@ -2488,7 +2488,8 @@ def analyze_intraday_signal_v2(row):
     核心逻辑：
     1. 四维评分判断市场情绪（Call评分高=市场偏多，Put评分高=市场偏空）
     2. 位置判断是否接近关键位
-    3. 综合生成信号
+    3. 关键位置考虑做市商反向对冲压制
+    4. 综合生成信号
     """
     # ========== 提取数据 ==========
     ticker = row.get('Ticker', row.get('Symbol', ''))
@@ -2497,6 +2498,7 @@ def analyze_intraday_signal_v2(row):
     put_wall = parse_number_safe(row.get('Put Wall'))
     hedge_wall = parse_number_safe(row.get('Hedge Wall'))
     key_gamma_strike = parse_number_safe(row.get('Key Gamma Strike'))
+    key_delta_strike = parse_number_safe(row.get('Key Delta Strike'))
     
     # DPI和Options Impact
     dpi = parse_number_safe(row.get('5 day DPI')) or parse_number_safe(row.get('DPI')) or 50
@@ -2511,6 +2513,7 @@ def analyze_intraday_signal_v2(row):
         'put_wall': put_wall,
         'hedge_wall': hedge_wall,
         'key_gamma_strike': key_gamma_strike,
+        'key_delta_strike': key_delta_strike,
         'dpi': dpi,
         'options_impact': options_impact,
         'implied_move': implied_move,
@@ -2527,7 +2530,8 @@ def analyze_intraday_signal_v2(row):
         'target': '',
         'confidence': {},
         'dpi_confirm': '',
-        'logic': []
+        'logic': [],
+        'mm_pressure': False  # 是否有做市商反向压制
     }
     
     # 数据完整性检查
@@ -2614,6 +2618,7 @@ def analyze_intraday_signal_v2(row):
     direction = 0
     action = 'WATCH ⚖️'
     target = ''
+    mm_pressure = False  # 做市商反向压制标记
     
     # --- 场景1: 市场强烈偏多 ---
     if sentiment == 'strong_bullish':
@@ -2629,7 +2634,8 @@ def analyze_intraday_signal_v2(row):
             action = 'BULLISH (Near Resistance) 🚀'
             target = f'目标突破 ${call_wall:.2f}'
             result['logic'].append("✅ 市场强烈偏多 + 接近Call Wall → 做多，观察突破")
-            result['logic'].append("⚠️ Call Wall可能形成阻力，关注是否突破")
+            result['logic'].append("⚠️ Call Wall可能形成阻力（83%概率被压制），关注是否突破")
+            mm_pressure = True
         else:
             # 远离阻力，顺势做多
             direction = 2
@@ -2645,11 +2651,13 @@ def analyze_intraday_signal_v2(row):
             target = '突破CW，持续关注'
             result['logic'].append("✅ 市场偏多 + 突破Call Wall → 做多")
         elif position_zone == 'near_cw':
+            # 偏多但接近阻力，需要更谨慎
             direction = 1
-            action = 'BULLISH (Caution) 🚀'
+            action = 'BULLISH (MM Resistance) 🚀⚠️'
             target = f'接近阻力 ${call_wall:.2f}'
             result['logic'].append("✅ 市场偏多 + 接近Call Wall → 谨慎做多")
-            result['logic'].append("⚠️ 83%概率被Call Wall压制")
+            result['logic'].append("⚠️ MM反向对冲：83%概率被Call Wall压制，注意回调风险")
+            mm_pressure = True
         elif position_zone == 'below_pw':
             direction = 1
             action = 'BULLISH (Oversold) 🚀'
@@ -2669,11 +2677,13 @@ def analyze_intraday_signal_v2(row):
             target = '跌破PW，趋势延续'
             result['logic'].append("✅ 市场强烈偏空 + 已跌破Put Wall → 强势做空")
         elif position_zone == 'near_pw':
+            # 接近Put Wall，观察跌破
             direction = -1
             action = 'BEARISH (Near Support) 💀'
             target = f'目标跌破 ${put_wall:.2f}'
             result['logic'].append("✅ 市场强烈偏空 + 接近Put Wall → 做空，观察跌破")
-            result['logic'].append("⚠️ Put Wall可能形成支撑，关注是否跌破")
+            result['logic'].append("⚠️ Put Wall可能形成支撑（89%概率获撑），关注是否跌破")
+            mm_pressure = True
         else:
             direction = -2
             action = 'STRONG BEARISH 💀💀'
@@ -2688,11 +2698,13 @@ def analyze_intraday_signal_v2(row):
             target = '跌破PW，持续关注'
             result['logic'].append("✅ 市场偏空 + 跌破Put Wall → 做空")
         elif position_zone == 'near_pw':
+            # 偏空但接近支撑，需要更谨慎
             direction = -1
-            action = 'BEARISH (Caution) 💀'
+            action = 'BEARISH (MM Support) 💀⚠️'
             target = f'接近支撑 ${put_wall:.2f}'
             result['logic'].append("✅ 市场偏空 + 接近Put Wall → 谨慎做空")
-            result['logic'].append("⚠️ 89%概率被Put Wall支撑")
+            result['logic'].append("⚠️ MM反向对冲：89%概率被Put Wall支撑，注意反弹风险")
+            mm_pressure = True
         elif position_zone == 'above_cw':
             direction = -1
             action = 'BEARISH (Overbought) 💀'
@@ -2704,28 +2716,36 @@ def analyze_intraday_signal_v2(row):
             target = f'目标 ${put_wall:.2f}'
             result['logic'].append("✅ 市场偏空 → 顺势做空")
     
-    # --- 场景5: 市场均衡 ---
+    # --- 场景5: 市场均衡但在关键位置（做市商压制/支撑主导）---
     else:
         if position_zone == 'near_cw':
-            direction = 0
-            action = 'WATCH (Resistance) ⚖️'
-            target = f'观察 ${call_wall:.2f} 阻力'
-            result['logic'].append("⚖️ 市场均衡 + 接近Call Wall → 观察阻力反应")
+            # 均衡但接近Call Wall → 做市商压制，倾向回落
+            direction = -1
+            action = 'MM FADE (Call Wall) 📉'
+            target = f'回落目标 ${key_gamma_strike:.2f}' if key_gamma_strike else f'观察回落'
+            result['logic'].append("⚖️ 市场均衡 + 接近Call Wall → 做市商压制主导")
+            result['logic'].append("📉 MM反向对冲卖出，83%概率回落，可轻仓做空")
+            mm_pressure = True
         elif position_zone == 'near_pw':
-            direction = 0
-            action = 'WATCH (Support) ⚖️'
-            target = f'观察 ${put_wall:.2f} 支撑'
-            result['logic'].append("⚖️ 市场均衡 + 接近Put Wall → 观察支撑反应")
+            # 均衡但接近Put Wall → 做市商支撑，倾向反弹
+            direction = 1
+            action = 'MM BOUNCE (Put Wall) 📈'
+            target = f'反弹目标 ${key_gamma_strike:.2f}' if key_gamma_strike else f'观察反弹'
+            result['logic'].append("⚖️ 市场均衡 + 接近Put Wall → 做市商支撑主导")
+            result['logic'].append("📈 MM反向对冲买入，89%概率反弹，可轻仓做多")
+            mm_pressure = True
         elif position_zone == 'above_cw':
+            # 均衡但已突破Call Wall → 观察是否回落
             direction = 0
             action = 'WATCH (Extended) ⚖️'
-            target = '观察是否回落'
-            result['logic'].append("⚖️ 市场均衡但价格偏高 → 观察")
+            target = '观察是否回落至CW'
+            result['logic'].append("⚖️ 市场均衡但价格偏高 → 观察是否回落")
         elif position_zone == 'below_pw':
+            # 均衡但已跌破Put Wall → 观察是否反弹
             direction = 0
             action = 'WATCH (Oversold) ⚖️'
-            target = '观察是否反弹'
-            result['logic'].append("⚖️ 市场均衡但价格偏低 → 观察")
+            target = '观察是否反弹至PW'
+            result['logic'].append("⚖️ 市场均衡但价格偏低 → 观察是否反弹")
         else:
             direction = 0
             action = 'NEUTRAL ⚖️'
@@ -2735,6 +2755,7 @@ def analyze_intraday_signal_v2(row):
     result['direction'] = direction
     result['action'] = action
     result['target'] = target
+    result['mm_pressure'] = mm_pressure
     
     # ========== 7. DPI确认逻辑 ==========
     if direction > 0 and dpi > 55:
@@ -2790,7 +2811,9 @@ def analyze_intraday_batch_v2(df):
             'Action': result['action'],
             'Target': result['target'],
             'Implied Move': result['implied_move'],
-            'Logic': result['logic']
+            'Logic': result['logic'],
+            'Key Delta Strike': result.get('key_delta_strike'),
+            'MM Pressure': result.get('mm_pressure', False)
         })
     
     return pd.DataFrame(results)
@@ -2804,11 +2827,12 @@ def main():
     st.title("🎯 股票波段期权筛选系统")
     st.caption(f"更新时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
         "📈 QQQ/NQ分析", 
         "📊 Equity Hub", 
         "📅 周五到期Gamma",
         "🎯 日内多空预测",
+        "📡 信号追踪",
         "📊 板块资金流", 
         "🔍 个股筛选", 
         "🎯 综合名单"
@@ -4128,6 +4152,66 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                     with raw_cols[3]:
                                         im = row.get('Implied Move')
                                         st.markdown(f"Implied Move: ${im:.2f}" if im else "Implied Move: N/A")
+                                    
+                                    # 关键位置数据
+                                    st.markdown("---")
+                                    st.markdown("**🎯 关键Gamma位置：**")
+                                    level_cols = st.columns(5)
+                                    with level_cols[0]:
+                                        cw = row.get('Call Wall')
+                                        st.markdown(f"**Call Wall**: ${cw:.2f}" if cw else "Call Wall: N/A")
+                                    with level_cols[1]:
+                                        pw = row.get('Put Wall')
+                                        st.markdown(f"**Put Wall**: ${pw:.2f}" if pw else "Put Wall: N/A")
+                                    with level_cols[2]:
+                                        hw = row.get('Hedge Wall')
+                                        st.markdown(f"**Hedge Wall**: ${hw:.2f}" if hw else "Hedge Wall: N/A")
+                                    with level_cols[3]:
+                                        kgs = row.get('Key Gamma Strike')
+                                        st.markdown(f"**Key Gamma**: ${kgs:.2f}" if kgs else "Key Gamma: N/A")
+                                    with level_cols[4]:
+                                        kds = row.get('Key Delta Strike')
+                                        st.markdown(f"**Key Delta**: ${kds:.2f}" if kds else "Key Delta: N/A")
+                                    
+                                    # MM压制标记
+                                    if row.get('MM Pressure', False):
+                                        st.warning("⚠️ 此信号在关键位置附近，存在做市商反向对冲压制风险")
+                                
+                                # 加入追踪按钮
+                                ticker = row['Ticker']
+                                direction = row.get('Direction', 0)
+                                if direction != 0:  # 只有有方向的信号才能追踪
+                                    if st.button(f"📡 加入追踪 {ticker}", key=f"track_{ticker}"):
+                                        if 'signal_tracking' not in st.session_state:
+                                            st.session_state['signal_tracking'] = {}
+                                        
+                                        # 添加或覆盖追踪数据
+                                        tracking_record = {
+                                            'ticker': ticker,
+                                            'signal_date': datetime.now().strftime('%Y-%m-%d'),
+                                            'd0_price': float(row.get('Current Price', 0) or 0),
+                                            'current_price': float(row.get('Current Price', 0) or 0),
+                                            'direction': int(direction),
+                                            'action': str(row.get('Action', '')),
+                                            'call_score': int(row.get('Call Score', 0) or 0),
+                                            'put_score': int(row.get('Put Score', 0) or 0),
+                                            'call_wall': float(row.get('Call Wall') or 0) if row.get('Call Wall') else None,
+                                            'put_wall': float(row.get('Put Wall') or 0) if row.get('Put Wall') else None,
+                                            'target': str(row.get('Target', '')),
+                                            'change_pct': 0.0,
+                                            'trading_days': 0,
+                                            'status': 'tracking',
+                                            'last_updated': datetime.now().strftime('%Y-%m-%d')
+                                        }
+                                        
+                                        st.session_state['signal_tracking'][ticker] = tracking_record
+                                        
+                                        # 保存到Google Sheets
+                                        SIGNAL_TRACKING_WS = "signal_tracking"
+                                        if save_worksheet_data(SIGNAL_TRACKING_WS, st.session_state['signal_tracking']):
+                                            st.success(f"✅ {ticker} 已加入追踪并同步到云端")
+                                        else:
+                                            st.success(f"✅ {ticker} 已加入追踪（本地）")
                                 
                                 st.markdown("---")
                     else:
@@ -4159,8 +4243,295 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
         else:
             st.info("👆 请上传SpotGamma Equity Hub CSV文件")
     
-    # ========== Tab 5: 板块资金流 ==========
+    # ========== Tab 5: 信号追踪 ==========
     with tab5:
+        st.header("📡 信号追踪")
+        st.caption("追踪日内预测信号的5个交易日表现，验证信号准确性")
+        
+        # Google Sheets worksheet名称
+        SIGNAL_TRACKING_WS = "signal_tracking"
+        
+        # 加载追踪数据（优先从Google Sheets）
+        @st.cache_data(ttl=60)  # 缓存60秒
+        def load_signal_tracking():
+            """从Google Sheets加载信号追踪数据"""
+            data = load_worksheet_data(SIGNAL_TRACKING_WS)
+            if data is None:
+                return {}, False
+            return data, True
+        
+        # 初始化
+        if 'signal_tracking_loaded' not in st.session_state:
+            tracking_data, gsheets_ok = load_signal_tracking()
+            st.session_state['signal_tracking'] = tracking_data
+            st.session_state['signal_tracking_gsheets'] = gsheets_ok
+            st.session_state['signal_tracking_loaded'] = True
+        
+        tracking_data = st.session_state.get('signal_tracking', {})
+        gsheets_connected = st.session_state.get('signal_tracking_gsheets', False)
+        
+        # 连接状态显示
+        if gsheets_connected:
+            st.success("✅ 已连接Google Sheets（数据持久化存储）")
+        else:
+            st.warning("⚠️ Google Sheets未连接，数据仅保存在当前会话")
+        
+        # 说明框
+        with st.expander("📖 追踪规则说明"):
+            st.markdown("""
+            ### 追踪规则
+            1. **信号来源**：从日内多空预测Tab点击"加入追踪"
+            2. **追踪周期**：D0（信号日）到 D5（5个交易日后）
+            3. **覆盖规则**：同一股票如有新信号，覆盖旧追踪
+            4. **验证标准**：
+               - 多头信号：D5涨幅 > 0% 为正确
+               - 空头信号：D5涨幅 < 0% 为正确
+            5. **数据存储**：Google Sheets持久化存储
+            6. **数据更新**：点击"刷新价格"从yfinance获取最新价格
+            """)
+        
+        # 操作按钮行
+        btn_cols = st.columns([1, 1, 1, 1])
+        
+        with btn_cols[0]:
+            if st.button("🔄 刷新价格", key="refresh_all_prices", use_container_width=True):
+                with st.spinner("正在从yfinance获取价格..."):
+                    try:
+                        updated_count = 0
+                        today = datetime.now().strftime('%Y-%m-%d')
+                        
+                        for ticker, data in tracking_data.items():
+                            try:
+                                stock = yf.Ticker(ticker)
+                                hist = stock.history(period="15d")
+                                if not hist.empty:
+                                    current_price = float(hist['Close'].iloc[-1])
+                                    data['current_price'] = current_price
+                                    data['last_updated'] = today
+                                    
+                                    # 计算涨跌幅
+                                    d0_price = data.get('d0_price', current_price)
+                                    if d0_price and d0_price > 0:
+                                        data['change_pct'] = (current_price - d0_price) / d0_price * 100
+                                    
+                                    # 计算交易天数（从信号日到现在的交易日数）
+                                    signal_date_str = data.get('signal_date', today)
+                                    try:
+                                        signal_date = datetime.strptime(signal_date_str, '%Y-%m-%d')
+                                        # 计算信号日之后的交易日数
+                                        hist_after_signal = hist[hist.index >= pd.Timestamp(signal_date)]
+                                        trading_days = len(hist_after_signal) - 1  # 减1因为D0不算
+                                        data['trading_days'] = max(0, min(trading_days, 5))
+                                    except:
+                                        data['trading_days'] = 0
+                                    
+                                    # 更新状态
+                                    if data['trading_days'] >= 5:
+                                        direction = data.get('direction', 0)
+                                        change_pct = data.get('change_pct', 0)
+                                        if direction > 0:
+                                            data['status'] = 'correct' if change_pct > 0 else 'wrong'
+                                        elif direction < 0:
+                                            data['status'] = 'correct' if change_pct < 0 else 'wrong'
+                                        else:
+                                            data['status'] = 'completed'
+                                    else:
+                                        data['status'] = 'tracking'
+                                    
+                                    updated_count += 1
+                            except Exception as e:
+                                st.warning(f"{ticker} 更新失败: {e}")
+                        
+                        # 保存到Google Sheets
+                        st.session_state['signal_tracking'] = tracking_data
+                        if save_worksheet_data(SIGNAL_TRACKING_WS, tracking_data):
+                            st.success(f"✅ 已更新 {updated_count} 个标的，已同步到Google Sheets")
+                        else:
+                            st.success(f"✅ 已更新 {updated_count} 个标的")
+                        
+                        # 清除缓存并刷新
+                        load_signal_tracking.clear()
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"更新失败: {e}")
+        
+        with btn_cols[1]:
+            if st.button("📥 从云端加载", key="reload_tracking", use_container_width=True):
+                load_signal_tracking.clear()
+                tracking_data, gsheets_ok = load_signal_tracking()
+                st.session_state['signal_tracking'] = tracking_data
+                st.session_state['signal_tracking_gsheets'] = gsheets_ok
+                st.success(f"✅ 已加载 {len(tracking_data)} 条追踪记录")
+                st.rerun()
+        
+        with btn_cols[2]:
+            if st.button("☁️ 保存到云端", key="save_tracking", use_container_width=True):
+                if save_worksheet_data(SIGNAL_TRACKING_WS, tracking_data):
+                    st.success("✅ 已保存到Google Sheets")
+                else:
+                    st.error("❌ 保存失败")
+        
+        with btn_cols[3]:
+            if st.button("🗑️ 清空所有", key="clear_tracking", use_container_width=True):
+                st.session_state['signal_tracking'] = {}
+                save_worksheet_data(SIGNAL_TRACKING_WS, {})
+                load_signal_tracking.clear()
+                st.success("已清空所有追踪数据")
+                st.rerun()
+        
+        st.divider()
+        
+        # 显示追踪数据
+        if tracking_data:
+            st.subheader("📊 追踪中的信号")
+            
+            # 统计
+            total = len(tracking_data)
+            bullish_signals = sum(1 for d in tracking_data.values() if d.get('direction', 0) > 0)
+            bearish_signals = sum(1 for d in tracking_data.values() if d.get('direction', 0) < 0)
+            
+            # 按状态分类
+            tracking_list = [d for d in tracking_data.values() if d.get('status', 'tracking') == 'tracking']
+            completed_list = [d for d in tracking_data.values() if d.get('status', '') in ['correct', 'wrong', 'completed']]
+            correct_list = [d for d in tracking_data.values() if d.get('status', '') == 'correct']
+            wrong_list = [d for d in tracking_data.values() if d.get('status', '') == 'wrong']
+            
+            # 计算准确率
+            if completed_list:
+                accuracy = len(correct_list) / len(completed_list) * 100
+            else:
+                accuracy = 0
+            
+            stat_cols = st.columns(6)
+            with stat_cols[0]:
+                st.metric("总计", total)
+            with stat_cols[1]:
+                st.metric("追踪中", len(tracking_list))
+            with stat_cols[2]:
+                st.metric("多头", bullish_signals)
+            with stat_cols[3]:
+                st.metric("空头", bearish_signals)
+            with stat_cols[4]:
+                st.metric("已完成", len(completed_list))
+            with stat_cols[5]:
+                st.metric("准确率", f"{accuracy:.1f}%" if completed_list else "N/A", 
+                         f"✅{len(correct_list)} ❌{len(wrong_list)}")
+            
+            st.divider()
+            
+            # 筛选器
+            filter_col1, filter_col2 = st.columns(2)
+            with filter_col1:
+                status_filter = st.selectbox(
+                    "状态筛选",
+                    ["全部", "追踪中", "已完成", "正确✅", "错误❌"],
+                    key="tracking_status_filter"
+                )
+            with filter_col2:
+                direction_filter = st.selectbox(
+                    "方向筛选",
+                    ["全部", "多头🚀", "空头💀"],
+                    key="tracking_direction_filter"
+                )
+            
+            # 应用筛选
+            filtered_data = tracking_data.copy()
+            if status_filter == "追踪中":
+                filtered_data = {k: v for k, v in filtered_data.items() if v.get('status', 'tracking') == 'tracking'}
+            elif status_filter == "已完成":
+                filtered_data = {k: v for k, v in filtered_data.items() if v.get('status', '') in ['correct', 'wrong', 'completed']}
+            elif status_filter == "正确✅":
+                filtered_data = {k: v for k, v in filtered_data.items() if v.get('status', '') == 'correct'}
+            elif status_filter == "错误❌":
+                filtered_data = {k: v for k, v in filtered_data.items() if v.get('status', '') == 'wrong'}
+            
+            if direction_filter == "多头🚀":
+                filtered_data = {k: v for k, v in filtered_data.items() if v.get('direction', 0) > 0}
+            elif direction_filter == "空头💀":
+                filtered_data = {k: v for k, v in filtered_data.items() if v.get('direction', 0) < 0}
+            
+            st.caption(f"显示 {len(filtered_data)} / {total} 条记录")
+            
+            # 详细列表
+            for ticker, data in sorted(filtered_data.items(), key=lambda x: x[1].get('signal_date', ''), reverse=True):
+                direction = data.get('direction', 0)
+                status = data.get('status', 'tracking')
+                
+                # 确定颜色
+                if direction > 0:
+                    border_color = "#00cc00"
+                    icon = "🚀" if direction == 1 else "🚀🚀"
+                elif direction < 0:
+                    border_color = "#ff4b4b"
+                    icon = "💀" if direction == -1 else "💀💀"
+                else:
+                    border_color = "#888888"
+                    icon = "⚖️"
+                
+                change_pct = data.get('change_pct', 0)
+                trading_days = data.get('trading_days', 0)
+                
+                # 结果图标
+                if status == 'correct':
+                    result_icon = "✅"
+                elif status == 'wrong':
+                    result_icon = "❌"
+                else:
+                    result_icon = f"D{trading_days}/D5"
+                
+                with st.container():
+                    st.markdown(f"""
+                    <div style="border-left: 4px solid {border_color}; padding-left: 15px; margin-bottom: 10px;">
+                    <h4>{icon} {ticker} - {data.get('action', 'N/A')} {result_icon}</h4>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    info_cols = st.columns(7)
+                    with info_cols[0]:
+                        d0_price = data.get('d0_price', 0)
+                        st.metric("D0价格", f"${d0_price:.2f}" if d0_price else "N/A")
+                    with info_cols[1]:
+                        current_price = data.get('current_price', 0)
+                        st.metric("当前价格", f"${current_price:.2f}" if current_price else "N/A")
+                    with info_cols[2]:
+                        delta_color = "normal" if change_pct >= 0 else "inverse"
+                        st.metric("涨跌幅", f"{change_pct:+.2f}%")
+                    with info_cols[3]:
+                        st.metric("交易天数", f"D{trading_days}")
+                    with info_cols[4]:
+                        st.metric("信号日期", data.get('signal_date', 'N/A'))
+                    with info_cols[5]:
+                        st.metric("Call/Put", f"{data.get('call_score', 0)}/{data.get('put_score', 0)}")
+                    with info_cols[6]:
+                        st.metric("目标", data.get('target', 'N/A')[:15])
+                    
+                    # 详情展开
+                    with st.expander(f"📋 {ticker} 详情"):
+                        detail_cols = st.columns(4)
+                        with detail_cols[0]:
+                            cw = data.get('call_wall')
+                            st.write(f"**Call Wall**: ${cw:.2f}" if cw else "Call Wall: N/A")
+                        with detail_cols[1]:
+                            pw = data.get('put_wall')
+                            st.write(f"**Put Wall**: ${pw:.2f}" if pw else "Put Wall: N/A")
+                        with detail_cols[2]:
+                            st.write(f"**最后更新**: {data.get('last_updated', 'N/A')}")
+                        with detail_cols[3]:
+                            st.write(f"**状态**: {status}")
+                        
+                        # 删除按钮
+                        if st.button(f"🗑️ 删除此记录", key=f"del_{ticker}"):
+                            del st.session_state['signal_tracking'][ticker]
+                            save_worksheet_data(SIGNAL_TRACKING_WS, st.session_state['signal_tracking'])
+                            load_signal_tracking.clear()
+                            st.rerun()
+                    
+                    st.markdown("---")
+        else:
+            st.info("📭 暂无追踪信号。请在「日内多空预测」Tab中点击「加入追踪」添加信号。")
+    
+    # ========== Tab 6: 板块资金流 ==========
+    with tab6:
         st.header("板块资金流扫描")
         st.caption("作为参考信息，辅助判断信号置信度")
         
@@ -4201,8 +4572,8 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
         if 'etf_data' in st.session_state:
             st.success("✅ 板块数据已缓存")
     
-    # ========== Tab 6: 个股筛选 ==========
-    with tab6:
+    # ========== Tab 7: 个股筛选 ==========
+    with tab7:
         st.header("个股技术筛选")
         
         # 股票池选择
@@ -4303,8 +4674,8 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                     if len(failed) > 0:
                         st.dataframe(failed[['ticker', 'reason']], use_container_width=True, hide_index=True)
     
-    # ========== Tab 7: 综合名单 ==========
-    with tab7:
+    # ========== Tab 8: 综合名单 ==========
+    with tab8:
         st.header("综合筛选名单")
         
         if 'stock_results' not in st.session_state:
