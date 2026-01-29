@@ -1413,23 +1413,32 @@ def analyze_qqq_nq(premarket_data, csv_data=None):
                     directional.append(f"• IV {iv_val:.1f}% ≈ RV {rv_val:.1f}%: 期权定价合理")
                 analysis['directional']['iv_rv'] = (iv_val, rv_val)
         
-        # DPI分析
+        # DPI分析 - 优先读取%DPI Volume
+        dpi_vol = csv_data.get('%DPI Volume')
         dpi = csv_data.get('DPI')
-        dpi_5d = csv_data.get('5Day DPI')
-        if dpi is not None:
+        dpi_5d = csv_data.get('5Day DPI') or csv_data.get('5 day DPI')
+        
+        # 解析DPI值（优先使用%DPI Volume）
+        dpi_val = None
+        if dpi_vol is not None:
+            dpi_val = parse_number_safe(str(dpi_vol).replace('%', ''))
+            if dpi_val and 0 <= dpi_val <= 1:
+                dpi_val = dpi_val * 100
+        elif dpi is not None:
             dpi_val = parse_number_safe(str(dpi).replace('%', ''))
-            if dpi_val:
-                if dpi_val < 1:
-                    dpi_val = dpi_val * 100
-                if dpi_val > 52:
-                    directional.append(f"• DPI {dpi_val:.1f}%: **机构强力买入** 🏦📈")
-                elif dpi_val > 48:
-                    directional.append(f"• DPI {dpi_val:.1f}%: 机构积极买入 🏦")
-                elif dpi_val < 45:
-                    directional.append(f"• DPI {dpi_val:.1f}%: **机构买盘减弱** ⚠️")
-                else:
-                    directional.append(f"• DPI {dpi_val:.1f}%: 机构中性")
-                analysis['directional']['dpi'] = dpi_val
+            if dpi_val and dpi_val < 1:
+                dpi_val = dpi_val * 100
+        
+        if dpi_val:
+            if dpi_val > 52:
+                directional.append(f"• DPI {dpi_val:.1f}%: **机构强力买入** 🏦📈")
+            elif dpi_val > 48:
+                directional.append(f"• DPI {dpi_val:.1f}%: 机构积极买入 🏦")
+            elif dpi_val < 45:
+                directional.append(f"• DPI {dpi_val:.1f}%: **机构买盘减弱** ⚠️")
+            else:
+                directional.append(f"• DPI {dpi_val:.1f}%: 机构中性")
+            analysis['directional']['dpi'] = dpi_val
         
         if dpi_5d is not None:
             dpi_5d_val = parse_number_safe(str(dpi_5d).replace('%', ''))
@@ -1526,6 +1535,60 @@ def parse_number_safe(value):
     except:
         return None
 
+
+def parse_dpi_value(row):
+    """
+    解析DPI值
+    
+    优先读取 '%DPI Volume' 列，该列的值如0.91表示91%
+    如果没有，则尝试读取 '5 day DPI' 或 'DPI' 列
+    
+    返回：百分比值（如91.0表示91%）
+    """
+    # 优先读取 %DPI Volume 列
+    dpi_vol = row.get('%DPI Volume')
+    if dpi_vol is not None and not pd.isna(dpi_vol):
+        try:
+            val = float(str(dpi_vol).replace('%', '').replace(',', ''))
+            # 如果值在0-1之间，说明是小数形式，需要乘以100
+            if 0 <= val <= 1:
+                return val * 100
+            # 如果值已经是百分比形式（如91），直接返回
+            elif 0 < val <= 100:
+                return val
+            # 异常值，返回默认
+            else:
+                return 50
+        except:
+            pass
+    
+    # 尝试读取 5 day DPI
+    dpi_5d = row.get('5 day DPI')
+    if dpi_5d is not None and not pd.isna(dpi_5d):
+        try:
+            val = float(str(dpi_5d).replace('%', '').replace(',', ''))
+            if 0 <= val <= 1:
+                return val * 100
+            elif 0 < val <= 100:
+                return val
+        except:
+            pass
+    
+    # 尝试读取 DPI
+    dpi = row.get('DPI')
+    if dpi is not None and not pd.isna(dpi):
+        try:
+            val = float(str(dpi).replace('%', '').replace(',', ''))
+            if 0 <= val <= 1:
+                return val * 100
+            elif 0 < val <= 100:
+                return val
+        except:
+            pass
+    
+    # 默认返回50（中性）
+    return 50
+
 def get_neg_strength(neg):
     """
     获取NEG强度 - 基于做市商解绑压力
@@ -1594,8 +1657,8 @@ def analyze_mm_unwinding_v3(row):
     # 其他指标
     options_impact = parse_number_safe(row.get('Options Impact'))
     iv_rank = parse_number_safe(row.get('IV Rank'))
-    dpi = parse_number_safe(row.get('DPI'))
-    dpi_5d = parse_number_safe(row.get('5 day DPI')) or dpi or 50
+    dpi_5d = parse_dpi_value(row)  # 使用专门的DPI解析函数
+    dpi = dpi_5d  # 保持兼容
     implied_move = parse_number_safe(row.get('Options Implied Move'))
     
     # 财报日期
@@ -2501,7 +2564,7 @@ def analyze_intraday_signal_v2(row):
     key_delta_strike = parse_number_safe(row.get('Key Delta Strike'))
     
     # DPI和Options Impact
-    dpi = parse_number_safe(row.get('5 day DPI')) or parse_number_safe(row.get('DPI')) or 50
+    dpi = parse_dpi_value(row)  # 使用专门的DPI解析函数
     options_impact = parse_number_safe(row.get('Options Impact')) or 0
     implied_move = parse_number_safe(row.get('Options Implied Move'))
     
