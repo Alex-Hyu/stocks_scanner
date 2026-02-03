@@ -4050,6 +4050,559 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                     
                     st.divider()
                     
+                    # ========== 多维度数据排行榜 ==========
+                    st.subheader("📊 多维度数据排行榜")
+                    st.caption("基于期权数据的多角度分析，发现潜在交易机会")
+                    
+                    # 准备排行榜数据（解析原始数据）
+                    def prepare_ranking_data(df):
+                        """准备排行榜数据"""
+                        ranking_df = df.copy()
+                        
+                        # 解析各列数据
+                        for col in ['Volume Ratio', 'Delta Ratio', 'Gamma Ratio', 'Options Impact', 
+                                   'IV Rank', 'Options Implied Move', '%DPI Volume', '5 day DPI',
+                                   'Next Exp Gamma', 'Current Price', 'Call Wall', 'Put Wall']:
+                            if col in ranking_df.columns:
+                                ranking_df[col + '_num'] = ranking_df[col].apply(
+                                    lambda x: parse_number_safe(str(x).replace('%', '')) if pd.notna(x) else None
+                                )
+                        
+                        # 处理%DPI Volume（0.91 -> 91）
+                        if '%DPI Volume_num' in ranking_df.columns:
+                            ranking_df['%DPI Volume_num'] = ranking_df['%DPI Volume_num'].apply(
+                                lambda x: x * 100 if x is not None and 0 <= x <= 1 else x
+                            )
+                        if '5 day DPI_num' in ranking_df.columns:
+                            ranking_df['5 day DPI_num'] = ranking_df['5 day DPI_num'].apply(
+                                lambda x: x * 100 if x is not None and 0 <= x <= 1 else x
+                            )
+                        
+                        # 计算价格与Wall的距离百分比
+                        if 'Current Price_num' in ranking_df.columns and 'Call Wall_num' in ranking_df.columns:
+                            ranking_df['Dist_to_CW_%'] = ranking_df.apply(
+                                lambda r: ((r['Call Wall_num'] - r['Current Price_num']) / r['Current Price_num'] * 100) 
+                                if r['Current Price_num'] and r['Call Wall_num'] and r['Current Price_num'] > 0 else None, axis=1
+                            )
+                        if 'Current Price_num' in ranking_df.columns and 'Put Wall_num' in ranking_df.columns:
+                            ranking_df['Dist_to_PW_%'] = ranking_df.apply(
+                                lambda r: ((r['Current Price_num'] - r['Put Wall_num']) / r['Current Price_num'] * 100) 
+                                if r['Current Price_num'] and r['Put Wall_num'] and r['Current Price_num'] > 0 else None, axis=1
+                            )
+                        
+                        return ranking_df
+                    
+                    ranking_data = prepare_ranking_data(intraday_df)
+                    
+                    # 排行榜选择
+                    ranking_tabs = st.tabs([
+                        "📈 机构动向", 
+                        "⚡ 期权结构", 
+                        "📍 价格位置",
+                        "🎯 综合筛选"
+                    ])
+                    
+                    # === Tab 1: 机构动向 ===
+                    with ranking_tabs[0]:
+                        st.markdown("#### 🏦 机构资金流向")
+                        
+                        dpi_cols = st.columns(2)
+                        
+                        with dpi_cols[0]:
+                            st.markdown("##### %DPI Volume 最高 Top10")
+                            st.caption("机构当日强力买入")
+                            if '%DPI Volume_num' in ranking_data.columns:
+                                top_dpi = ranking_data.dropna(subset=['%DPI Volume_num']).nlargest(10, '%DPI Volume_num')
+                                if not top_dpi.empty:
+                                    display_df = top_dpi[['Ticker', '%DPI Volume_num']].copy()
+                                    display_df.columns = ['股票', 'DPI%']
+                                    display_df['DPI%'] = display_df['DPI%'].apply(lambda x: f"{x:.1f}%" if x else "N/A")
+                                    st.dataframe(display_df, hide_index=True, use_container_width=True)
+                                else:
+                                    st.info("无数据")
+                            else:
+                                st.info("数据列不存在")
+                        
+                        with dpi_cols[1]:
+                            st.markdown("##### %DPI Volume 最低 Top10")
+                            st.caption("机构当日强力卖出")
+                            if '%DPI Volume_num' in ranking_data.columns:
+                                bottom_dpi = ranking_data.dropna(subset=['%DPI Volume_num']).nsmallest(10, '%DPI Volume_num')
+                                if not bottom_dpi.empty:
+                                    display_df = bottom_dpi[['Ticker', '%DPI Volume_num']].copy()
+                                    display_df.columns = ['股票', 'DPI%']
+                                    display_df['DPI%'] = display_df['DPI%'].apply(lambda x: f"{x:.1f}%" if x else "N/A")
+                                    st.dataframe(display_df, hide_index=True, use_container_width=True)
+                                else:
+                                    st.info("无数据")
+                            else:
+                                st.info("数据列不存在")
+                        
+                        dpi_5d_cols = st.columns(2)
+                        
+                        with dpi_5d_cols[0]:
+                            st.markdown("##### 5日DPI 最高 Top10")
+                            st.caption("机构连续5日买入")
+                            if '5 day DPI_num' in ranking_data.columns:
+                                top_5d = ranking_data.dropna(subset=['5 day DPI_num']).nlargest(10, '5 day DPI_num')
+                                if not top_5d.empty:
+                                    display_df = top_5d[['Ticker', '5 day DPI_num']].copy()
+                                    display_df.columns = ['股票', '5日DPI%']
+                                    display_df['5日DPI%'] = display_df['5日DPI%'].apply(lambda x: f"{x:.1f}%" if x else "N/A")
+                                    st.dataframe(display_df, hide_index=True, use_container_width=True)
+                                else:
+                                    st.info("无数据")
+                            else:
+                                st.info("数据列不存在")
+                        
+                        with dpi_5d_cols[1]:
+                            st.markdown("##### 5日DPI 最低 Top10")
+                            st.caption("机构连续5日卖出")
+                            if '5 day DPI_num' in ranking_data.columns:
+                                bottom_5d = ranking_data.dropna(subset=['5 day DPI_num']).nsmallest(10, '5 day DPI_num')
+                                if not bottom_5d.empty:
+                                    display_df = bottom_5d[['Ticker', '5 day DPI_num']].copy()
+                                    display_df.columns = ['股票', '5日DPI%']
+                                    display_df['5日DPI%'] = display_df['5日DPI%'].apply(lambda x: f"{x:.1f}%" if x else "N/A")
+                                    st.dataframe(display_df, hide_index=True, use_container_width=True)
+                                else:
+                                    st.info("无数据")
+                            else:
+                                st.info("数据列不存在")
+                    
+                    # === Tab 2: 期权结构 ===
+                    with ranking_tabs[1]:
+                        st.markdown("#### ⚡ 期权市场结构")
+                        
+                        struct_row1 = st.columns(3)
+                        
+                        with struct_row1[0]:
+                            st.markdown("##### Volume Ratio 最高 Top10")
+                            st.caption("ATM Put活跃，看跌情绪")
+                            if 'Volume Ratio_num' in ranking_data.columns:
+                                top_vr = ranking_data.dropna(subset=['Volume Ratio_num']).nlargest(10, 'Volume Ratio_num')
+                                if not top_vr.empty:
+                                    display_df = top_vr[['Ticker', 'Volume Ratio_num']].copy()
+                                    display_df.columns = ['股票', 'Vol Ratio']
+                                    display_df['Vol Ratio'] = display_df['Vol Ratio'].apply(lambda x: f"{x:.2f}" if x else "N/A")
+                                    st.dataframe(display_df, hide_index=True, use_container_width=True)
+                                else:
+                                    st.info("无数据")
+                            else:
+                                st.info("数据列不存在")
+                        
+                        with struct_row1[1]:
+                            st.markdown("##### Volume Ratio 最低 Top10")
+                            st.caption("ATM Call活跃，看涨情绪")
+                            if 'Volume Ratio_num' in ranking_data.columns:
+                                # 过滤掉0和负数
+                                valid_vr = ranking_data[ranking_data['Volume Ratio_num'] > 0].dropna(subset=['Volume Ratio_num'])
+                                bottom_vr = valid_vr.nsmallest(10, 'Volume Ratio_num')
+                                if not bottom_vr.empty:
+                                    display_df = bottom_vr[['Ticker', 'Volume Ratio_num']].copy()
+                                    display_df.columns = ['股票', 'Vol Ratio']
+                                    display_df['Vol Ratio'] = display_df['Vol Ratio'].apply(lambda x: f"{x:.2f}" if x else "N/A")
+                                    st.dataframe(display_df, hide_index=True, use_container_width=True)
+                                else:
+                                    st.info("无数据")
+                            else:
+                                st.info("数据列不存在")
+                        
+                        with struct_row1[2]:
+                            st.markdown("##### Options Impact 最高 Top10")
+                            st.caption("期权主导股价，Gamma效应强")
+                            if 'Options Impact_num' in ranking_data.columns:
+                                top_oi = ranking_data.dropna(subset=['Options Impact_num']).nlargest(10, 'Options Impact_num')
+                                if not top_oi.empty:
+                                    display_df = top_oi[['Ticker', 'Options Impact_num']].copy()
+                                    display_df.columns = ['股票', 'OI%']
+                                    display_df['OI%'] = display_df['OI%'].apply(lambda x: f"{x:.1f}%" if x else "N/A")
+                                    st.dataframe(display_df, hide_index=True, use_container_width=True)
+                                else:
+                                    st.info("无数据")
+                            else:
+                                st.info("数据列不存在")
+                        
+                        struct_row2 = st.columns(3)
+                        
+                        with struct_row2[0]:
+                            st.markdown("##### Delta Ratio 最负 Top10")
+                            st.caption("极度偏空，可能超卖反弹")
+                            if 'Delta Ratio_num' in ranking_data.columns:
+                                most_neg_dr = ranking_data.dropna(subset=['Delta Ratio_num']).nsmallest(10, 'Delta Ratio_num')
+                                if not most_neg_dr.empty:
+                                    display_df = most_neg_dr[['Ticker', 'Delta Ratio_num']].copy()
+                                    display_df.columns = ['股票', 'Delta Ratio']
+                                    display_df['Delta Ratio'] = display_df['Delta Ratio'].apply(lambda x: f"{x:.2f}" if x else "N/A")
+                                    st.dataframe(display_df, hide_index=True, use_container_width=True)
+                                else:
+                                    st.info("无数据")
+                            else:
+                                st.info("数据列不存在")
+                        
+                        with struct_row2[1]:
+                            st.markdown("##### Gamma Ratio 最高 Top10")
+                            st.caption("Put Gamma主导，下跌加速")
+                            if 'Gamma Ratio_num' in ranking_data.columns:
+                                top_gr = ranking_data.dropna(subset=['Gamma Ratio_num']).nlargest(10, 'Gamma Ratio_num')
+                                if not top_gr.empty:
+                                    display_df = top_gr[['Ticker', 'Gamma Ratio_num']].copy()
+                                    display_df.columns = ['股票', 'Gamma Ratio']
+                                    display_df['Gamma Ratio'] = display_df['Gamma Ratio'].apply(lambda x: f"{x:.2f}" if x else "N/A")
+                                    st.dataframe(display_df, hide_index=True, use_container_width=True)
+                                else:
+                                    st.info("无数据")
+                            else:
+                                st.info("数据列不存在")
+                        
+                        with struct_row2[2]:
+                            st.markdown("##### Gamma Ratio 最低 Top10")
+                            st.caption("Call Gamma主导，上涨加速")
+                            if 'Gamma Ratio_num' in ranking_data.columns:
+                                valid_gr = ranking_data[ranking_data['Gamma Ratio_num'] > 0].dropna(subset=['Gamma Ratio_num'])
+                                bottom_gr = valid_gr.nsmallest(10, 'Gamma Ratio_num')
+                                if not bottom_gr.empty:
+                                    display_df = bottom_gr[['Ticker', 'Gamma Ratio_num']].copy()
+                                    display_df.columns = ['股票', 'Gamma Ratio']
+                                    display_df['Gamma Ratio'] = display_df['Gamma Ratio'].apply(lambda x: f"{x:.2f}" if x else "N/A")
+                                    st.dataframe(display_df, hide_index=True, use_container_width=True)
+                                else:
+                                    st.info("无数据")
+                            else:
+                                st.info("数据列不存在")
+                        
+                        struct_row3 = st.columns(3)
+                        
+                        with struct_row3[0]:
+                            st.markdown("##### Next Exp Gamma 最高 Top10")
+                            st.caption("短期Gamma集中，到期前波动大")
+                            if 'Next Exp Gamma_num' in ranking_data.columns:
+                                top_neg = ranking_data.dropna(subset=['Next Exp Gamma_num']).nlargest(10, 'Next Exp Gamma_num')
+                                if not top_neg.empty:
+                                    display_df = top_neg[['Ticker', 'Next Exp Gamma_num']].copy()
+                                    display_df.columns = ['股票', 'NEG%']
+                                    display_df['NEG%'] = display_df['NEG%'].apply(lambda x: f"{x:.1f}%" if x else "N/A")
+                                    st.dataframe(display_df, hide_index=True, use_container_width=True)
+                                else:
+                                    st.info("无数据")
+                            else:
+                                st.info("数据列不存在")
+                        
+                        with struct_row3[1]:
+                            st.markdown("##### IV Rank 最高 Top10")
+                            st.caption("IV高位，适合卖方策略")
+                            if 'IV Rank_num' in ranking_data.columns:
+                                top_iv = ranking_data.dropna(subset=['IV Rank_num']).nlargest(10, 'IV Rank_num')
+                                if not top_iv.empty:
+                                    display_df = top_iv[['Ticker', 'IV Rank_num']].copy()
+                                    display_df.columns = ['股票', 'IV Rank']
+                                    display_df['IV Rank'] = display_df['IV Rank'].apply(lambda x: f"{x:.1f}" if x else "N/A")
+                                    st.dataframe(display_df, hide_index=True, use_container_width=True)
+                                else:
+                                    st.info("无数据")
+                            else:
+                                st.info("数据列不存在")
+                        
+                        with struct_row3[2]:
+                            st.markdown("##### Implied Move 最大 Top10")
+                            st.caption("预期波动最大")
+                            if 'Options Implied Move_num' in ranking_data.columns:
+                                top_im = ranking_data.dropna(subset=['Options Implied Move_num']).nlargest(10, 'Options Implied Move_num')
+                                if not top_im.empty:
+                                    display_df = top_im[['Ticker', 'Options Implied Move_num']].copy()
+                                    display_df.columns = ['股票', 'Implied Move']
+                                    display_df['Implied Move'] = display_df['Implied Move'].apply(lambda x: f"${x:.2f}" if x else "N/A")
+                                    st.dataframe(display_df, hide_index=True, use_container_width=True)
+                                else:
+                                    st.info("无数据")
+                            else:
+                                st.info("数据列不存在")
+                    
+                    # === Tab 3: 价格位置 ===
+                    with ranking_tabs[2]:
+                        st.markdown("#### 📍 价格与关键位置")
+                        
+                        pos_cols = st.columns(2)
+                        
+                        with pos_cols[0]:
+                            st.markdown("##### 最接近Call Wall Top10")
+                            st.caption("即将测试阻力，突破或回落")
+                            if 'Dist_to_CW_%' in ranking_data.columns:
+                                # 距离最小且为正（价格在CW下方）
+                                near_cw = ranking_data[ranking_data['Dist_to_CW_%'] > 0].dropna(subset=['Dist_to_CW_%']).nsmallest(10, 'Dist_to_CW_%')
+                                if not near_cw.empty:
+                                    display_df = near_cw[['Ticker', 'Current Price_num', 'Call Wall_num', 'Dist_to_CW_%']].copy()
+                                    display_df.columns = ['股票', '当前价', 'Call Wall', '距离%']
+                                    display_df['当前价'] = display_df['当前价'].apply(lambda x: f"${x:.2f}" if x else "N/A")
+                                    display_df['Call Wall'] = display_df['Call Wall'].apply(lambda x: f"${x:.2f}" if x else "N/A")
+                                    display_df['距离%'] = display_df['距离%'].apply(lambda x: f"+{x:.1f}%" if x else "N/A")
+                                    st.dataframe(display_df, hide_index=True, use_container_width=True)
+                                else:
+                                    st.info("无数据")
+                            else:
+                                st.info("数据列不存在")
+                        
+                        with pos_cols[1]:
+                            st.markdown("##### 最接近Put Wall Top10")
+                            st.caption("即将测试支撑，反弹或破位")
+                            if 'Dist_to_PW_%' in ranking_data.columns:
+                                # 距离最小且为正（价格在PW上方）
+                                near_pw = ranking_data[ranking_data['Dist_to_PW_%'] > 0].dropna(subset=['Dist_to_PW_%']).nsmallest(10, 'Dist_to_PW_%')
+                                if not near_pw.empty:
+                                    display_df = near_pw[['Ticker', 'Current Price_num', 'Put Wall_num', 'Dist_to_PW_%']].copy()
+                                    display_df.columns = ['股票', '当前价', 'Put Wall', '距离%']
+                                    display_df['当前价'] = display_df['当前价'].apply(lambda x: f"${x:.2f}" if x else "N/A")
+                                    display_df['Put Wall'] = display_df['Put Wall'].apply(lambda x: f"${x:.2f}" if x else "N/A")
+                                    display_df['距离%'] = display_df['距离%'].apply(lambda x: f"+{x:.1f}%" if x else "N/A")
+                                    st.dataframe(display_df, hide_index=True, use_container_width=True)
+                                else:
+                                    st.info("无数据")
+                            else:
+                                st.info("数据列不存在")
+                        
+                        pos_cols2 = st.columns(2)
+                        
+                        with pos_cols2[0]:
+                            st.markdown("##### Call Wall上涨空间最大 Top10")
+                            st.caption("多头空间充足")
+                            if 'Dist_to_CW_%' in ranking_data.columns:
+                                most_room_up = ranking_data[ranking_data['Dist_to_CW_%'] > 0].dropna(subset=['Dist_to_CW_%']).nlargest(10, 'Dist_to_CW_%')
+                                if not most_room_up.empty:
+                                    display_df = most_room_up[['Ticker', 'Current Price_num', 'Call Wall_num', 'Dist_to_CW_%']].copy()
+                                    display_df.columns = ['股票', '当前价', 'Call Wall', '上涨空间%']
+                                    display_df['当前价'] = display_df['当前价'].apply(lambda x: f"${x:.2f}" if x else "N/A")
+                                    display_df['Call Wall'] = display_df['Call Wall'].apply(lambda x: f"${x:.2f}" if x else "N/A")
+                                    display_df['上涨空间%'] = display_df['上涨空间%'].apply(lambda x: f"+{x:.1f}%" if x else "N/A")
+                                    st.dataframe(display_df, hide_index=True, use_container_width=True)
+                                else:
+                                    st.info("无数据")
+                            else:
+                                st.info("数据列不存在")
+                        
+                        with pos_cols2[1]:
+                            st.markdown("##### Put Wall下跌空间最大 Top10")
+                            st.caption("空头空间充足")
+                            if 'Dist_to_PW_%' in ranking_data.columns:
+                                most_room_down = ranking_data[ranking_data['Dist_to_PW_%'] > 0].dropna(subset=['Dist_to_PW_%']).nlargest(10, 'Dist_to_PW_%')
+                                if not most_room_down.empty:
+                                    display_df = most_room_down[['Ticker', 'Current Price_num', 'Put Wall_num', 'Dist_to_PW_%']].copy()
+                                    display_df.columns = ['股票', '当前价', 'Put Wall', '下跌空间%']
+                                    display_df['当前价'] = display_df['当前价'].apply(lambda x: f"${x:.2f}" if x else "N/A")
+                                    display_df['Put Wall'] = display_df['Put Wall'].apply(lambda x: f"${x:.2f}" if x else "N/A")
+                                    display_df['下跌空间%'] = display_df['下跌空间%'].apply(lambda x: f"+{x:.1f}%" if x else "N/A")
+                                    st.dataframe(display_df, hide_index=True, use_container_width=True)
+                                else:
+                                    st.info("无数据")
+                            else:
+                                st.info("数据列不存在")
+                    
+                    # === Tab 4: 综合筛选 ===
+                    with ranking_tabs[3]:
+                        st.markdown("#### 🎯 综合条件筛选")
+                        st.caption("多条件组合筛选，发现最佳交易机会")
+                        
+                        # 预设筛选器
+                        preset = st.selectbox(
+                            "选择预设筛选条件",
+                            [
+                                "自定义",
+                                "🚀 最佳做多：DPI高 + Vol Ratio低 + OI高",
+                                "💀 最佳做空：DPI低 + Vol Ratio高 + OI高",
+                                "⚡ Gamma Squeeze候选：NEG高 + Gamma Ratio低",
+                                "🎯 机构抄底：DPI高 + 接近Put Wall",
+                                "⚠️ 机构出货：DPI低 + 接近Call Wall"
+                            ],
+                            key="ranking_preset"
+                        )
+                        
+                        # 根据预设筛选
+                        if preset != "自定义":
+                            filtered_ranking = ranking_data.copy()
+                            
+                            if preset == "🚀 最佳做多：DPI高 + Vol Ratio低 + OI高":
+                                conditions = []
+                                if '%DPI Volume_num' in filtered_ranking.columns:
+                                    conditions.append(filtered_ranking['%DPI Volume_num'] > 55)
+                                if 'Volume Ratio_num' in filtered_ranking.columns:
+                                    conditions.append(filtered_ranking['Volume Ratio_num'] < 1.0)
+                                if 'Options Impact_num' in filtered_ranking.columns:
+                                    conditions.append(filtered_ranking['Options Impact_num'] > 15)
+                                
+                                if conditions:
+                                    mask = conditions[0]
+                                    for cond in conditions[1:]:
+                                        mask = mask & cond
+                                    filtered_ranking = filtered_ranking[mask]
+                                
+                                st.success(f"筛选条件：DPI > 55% & Volume Ratio < 1.0 & Options Impact > 15%")
+                            
+                            elif preset == "💀 最佳做空：DPI低 + Vol Ratio高 + OI高":
+                                conditions = []
+                                if '%DPI Volume_num' in filtered_ranking.columns:
+                                    conditions.append(filtered_ranking['%DPI Volume_num'] < 45)
+                                if 'Volume Ratio_num' in filtered_ranking.columns:
+                                    conditions.append(filtered_ranking['Volume Ratio_num'] > 1.5)
+                                if 'Options Impact_num' in filtered_ranking.columns:
+                                    conditions.append(filtered_ranking['Options Impact_num'] > 15)
+                                
+                                if conditions:
+                                    mask = conditions[0]
+                                    for cond in conditions[1:]:
+                                        mask = mask & cond
+                                    filtered_ranking = filtered_ranking[mask]
+                                
+                                st.warning(f"筛选条件：DPI < 45% & Volume Ratio > 1.5 & Options Impact > 15%")
+                            
+                            elif preset == "⚡ Gamma Squeeze候选：NEG高 + Gamma Ratio低":
+                                conditions = []
+                                if 'Next Exp Gamma_num' in filtered_ranking.columns:
+                                    conditions.append(filtered_ranking['Next Exp Gamma_num'] > 25)
+                                if 'Gamma Ratio_num' in filtered_ranking.columns:
+                                    conditions.append(filtered_ranking['Gamma Ratio_num'] < 0.8)
+                                
+                                if conditions:
+                                    mask = conditions[0]
+                                    for cond in conditions[1:]:
+                                        mask = mask & cond
+                                    filtered_ranking = filtered_ranking[mask]
+                                
+                                st.info(f"筛选条件：Next Exp Gamma > 25% & Gamma Ratio < 0.8")
+                            
+                            elif preset == "🎯 机构抄底：DPI高 + 接近Put Wall":
+                                conditions = []
+                                if '%DPI Volume_num' in filtered_ranking.columns:
+                                    conditions.append(filtered_ranking['%DPI Volume_num'] > 55)
+                                if 'Dist_to_PW_%' in filtered_ranking.columns:
+                                    conditions.append(filtered_ranking['Dist_to_PW_%'] < 3)
+                                    conditions.append(filtered_ranking['Dist_to_PW_%'] > 0)
+                                
+                                if conditions:
+                                    mask = conditions[0]
+                                    for cond in conditions[1:]:
+                                        mask = mask & cond
+                                    filtered_ranking = filtered_ranking[mask]
+                                
+                                st.success(f"筛选条件：DPI > 55% & 距离Put Wall < 3%")
+                            
+                            elif preset == "⚠️ 机构出货：DPI低 + 接近Call Wall":
+                                conditions = []
+                                if '%DPI Volume_num' in filtered_ranking.columns:
+                                    conditions.append(filtered_ranking['%DPI Volume_num'] < 45)
+                                if 'Dist_to_CW_%' in filtered_ranking.columns:
+                                    conditions.append(filtered_ranking['Dist_to_CW_%'] < 3)
+                                    conditions.append(filtered_ranking['Dist_to_CW_%'] > 0)
+                                
+                                if conditions:
+                                    mask = conditions[0]
+                                    for cond in conditions[1:]:
+                                        mask = mask & cond
+                                    filtered_ranking = filtered_ranking[mask]
+                                
+                                st.warning(f"筛选条件：DPI < 45% & 距离Call Wall < 3%")
+                            
+                            # 显示结果
+                            st.markdown(f"##### 筛选结果: {len(filtered_ranking)} 只")
+                            
+                            if not filtered_ranking.empty:
+                                # 构建显示列
+                                display_cols = ['Ticker']
+                                col_names = ['股票']
+                                
+                                if '%DPI Volume_num' in filtered_ranking.columns:
+                                    display_cols.append('%DPI Volume_num')
+                                    col_names.append('DPI%')
+                                if 'Volume Ratio_num' in filtered_ranking.columns:
+                                    display_cols.append('Volume Ratio_num')
+                                    col_names.append('Vol Ratio')
+                                if 'Options Impact_num' in filtered_ranking.columns:
+                                    display_cols.append('Options Impact_num')
+                                    col_names.append('OI%')
+                                if 'Gamma Ratio_num' in filtered_ranking.columns:
+                                    display_cols.append('Gamma Ratio_num')
+                                    col_names.append('Gamma Ratio')
+                                if 'Dist_to_CW_%' in filtered_ranking.columns:
+                                    display_cols.append('Dist_to_CW_%')
+                                    col_names.append('距CW%')
+                                if 'Dist_to_PW_%' in filtered_ranking.columns:
+                                    display_cols.append('Dist_to_PW_%')
+                                    col_names.append('距PW%')
+                                
+                                result_df = filtered_ranking[display_cols].head(20).copy()
+                                result_df.columns = col_names
+                                
+                                # 格式化
+                                if 'DPI%' in result_df.columns:
+                                    result_df['DPI%'] = result_df['DPI%'].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A")
+                                if 'Vol Ratio' in result_df.columns:
+                                    result_df['Vol Ratio'] = result_df['Vol Ratio'].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "N/A")
+                                if 'OI%' in result_df.columns:
+                                    result_df['OI%'] = result_df['OI%'].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A")
+                                if 'Gamma Ratio' in result_df.columns:
+                                    result_df['Gamma Ratio'] = result_df['Gamma Ratio'].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "N/A")
+                                if '距CW%' in result_df.columns:
+                                    result_df['距CW%'] = result_df['距CW%'].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A")
+                                if '距PW%' in result_df.columns:
+                                    result_df['距PW%'] = result_df['距PW%'].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A")
+                                
+                                st.dataframe(result_df, hide_index=True, use_container_width=True)
+                            else:
+                                st.info("无符合条件的标的")
+                        
+                        else:
+                            # 自定义筛选
+                            st.markdown("##### 自定义筛选条件")
+                            
+                            cust_cols = st.columns(3)
+                            
+                            with cust_cols[0]:
+                                dpi_min = st.number_input("DPI最小值%", value=0, min_value=0, max_value=100, key="cust_dpi_min")
+                                dpi_max = st.number_input("DPI最大值%", value=100, min_value=0, max_value=100, key="cust_dpi_max")
+                            
+                            with cust_cols[1]:
+                                vr_min = st.number_input("Vol Ratio最小值", value=0.0, min_value=0.0, max_value=10.0, step=0.1, key="cust_vr_min")
+                                vr_max = st.number_input("Vol Ratio最大值", value=10.0, min_value=0.0, max_value=10.0, step=0.1, key="cust_vr_max")
+                            
+                            with cust_cols[2]:
+                                oi_min = st.number_input("Options Impact最小值%", value=0, min_value=0, max_value=100, key="cust_oi_min")
+                            
+                            if st.button("🔍 执行筛选", key="run_custom_filter"):
+                                filtered_custom = ranking_data.copy()
+                                
+                                if '%DPI Volume_num' in filtered_custom.columns:
+                                    filtered_custom = filtered_custom[
+                                        (filtered_custom['%DPI Volume_num'] >= dpi_min) & 
+                                        (filtered_custom['%DPI Volume_num'] <= dpi_max)
+                                    ]
+                                
+                                if 'Volume Ratio_num' in filtered_custom.columns:
+                                    filtered_custom = filtered_custom[
+                                        (filtered_custom['Volume Ratio_num'] >= vr_min) & 
+                                        (filtered_custom['Volume Ratio_num'] <= vr_max)
+                                    ]
+                                
+                                if 'Options Impact_num' in filtered_custom.columns:
+                                    filtered_custom = filtered_custom[filtered_custom['Options Impact_num'] >= oi_min]
+                                
+                                st.markdown(f"##### 筛选结果: {len(filtered_custom)} 只")
+                                
+                                if not filtered_custom.empty:
+                                    display_cols = ['Ticker']
+                                    if '%DPI Volume_num' in filtered_custom.columns:
+                                        display_cols.append('%DPI Volume_num')
+                                    if 'Volume Ratio_num' in filtered_custom.columns:
+                                        display_cols.append('Volume Ratio_num')
+                                    if 'Options Impact_num' in filtered_custom.columns:
+                                        display_cols.append('Options Impact_num')
+                                    
+                                    result_df = filtered_custom[display_cols].head(30).copy()
+                                    result_df.columns = ['股票', 'DPI%', 'Vol Ratio', 'OI%'][:len(display_cols)]
+                                    
+                                    st.dataframe(result_df, hide_index=True, use_container_width=True)
+                                else:
+                                    st.info("无符合条件的标的")
+                    
+                    st.divider()
+                    
                     # ========== 详细信号列表 ==========
                     st.subheader("🎯 详细信号列表")
                     
