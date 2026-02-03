@@ -4059,40 +4059,83 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                         """准备排行榜数据"""
                         ranking_df = df.copy()
                         
-                        # 解析各列数据
-                        for col in ['Volume Ratio', 'Delta Ratio', 'Gamma Ratio', 'Options Impact', 
-                                   'IV Rank', 'Options Implied Move', '%DPI Volume', '5 day DPI',
-                                   'Next Exp Gamma', 'Current Price', 'Call Wall', 'Put Wall']:
-                            if col in ranking_df.columns:
-                                ranking_df[col + '_num'] = ranking_df[col].apply(
-                                    lambda x: parse_number_safe(str(x).replace('%', '')) if pd.notna(x) else None
+                        # 列名映射（处理各种可能的列名变体）
+                        column_variants = {
+                            'Volume Ratio': ['Volume Ratio', 'VolumeRatio', 'Vol Ratio'],
+                            'Delta Ratio': ['Delta Ratio', 'DeltaRatio'],
+                            'Gamma Ratio': ['Gamma Ratio', 'GammaRatio'],
+                            'Options Impact': ['Options Impact', 'OptionsImpact', 'OI'],
+                            'IV Rank': ['IV Rank', 'IVRank', 'IV_Rank'],
+                            'Options Implied Move': ['Options Implied Move', 'Implied Move', 'ImpliedMove'],
+                            '%DPI Volume': ['%DPI Volume', '%DPIVolume', 'DPI Volume', 'DPI_Volume', '%DPI', 'DPI%'],
+                            '5 day DPI': ['5 day DPI', '5day DPI', '5DayDPI', '5 Day DPI', '5d DPI'],
+                            'Next Exp Gamma': ['Next Exp Gamma', 'NextExpGamma', 'NEG'],
+                            'Current Price': ['Current Price', 'CurrentPrice', 'Price', 'Last Price'],
+                            'Call Wall': ['Call Wall', 'CallWall', 'CW'],
+                            'Put Wall': ['Put Wall', 'PutWall', 'PW'],
+                        }
+                        
+                        # 查找实际存在的列名
+                        def find_column(df, variants):
+                            for v in variants:
+                                if v in df.columns:
+                                    return v
+                                # 尝试不区分大小写匹配
+                                for col in df.columns:
+                                    if col.lower().replace(' ', '').replace('_', '') == v.lower().replace(' ', '').replace('_', ''):
+                                        return col
+                            return None
+                        
+                        # 标准化列名
+                        actual_columns = {}
+                        for standard_name, variants in column_variants.items():
+                            found = find_column(ranking_df, variants)
+                            if found:
+                                actual_columns[standard_name] = found
+                        
+                        # 解析各列数据并强制转换为float
+                        for standard_name, actual_col in actual_columns.items():
+                            try:
+                                ranking_df[standard_name + '_num'] = pd.to_numeric(
+                                    ranking_df[actual_col].astype(str).str.replace('%', '').str.replace('$', '').str.replace(',', ''),
+                                    errors='coerce'
                                 )
+                            except Exception as e:
+                                pass
                         
                         # 处理%DPI Volume（0.91 -> 91）
                         if '%DPI Volume_num' in ranking_df.columns:
                             ranking_df['%DPI Volume_num'] = ranking_df['%DPI Volume_num'].apply(
-                                lambda x: x * 100 if x is not None and 0 <= x <= 1 else x
+                                lambda x: x * 100 if pd.notna(x) and 0 <= x <= 1 else x
                             )
                         if '5 day DPI_num' in ranking_df.columns:
                             ranking_df['5 day DPI_num'] = ranking_df['5 day DPI_num'].apply(
-                                lambda x: x * 100 if x is not None and 0 <= x <= 1 else x
+                                lambda x: x * 100 if pd.notna(x) and 0 <= x <= 1 else x
                             )
                         
                         # 计算价格与Wall的距离百分比
                         if 'Current Price_num' in ranking_df.columns and 'Call Wall_num' in ranking_df.columns:
                             ranking_df['Dist_to_CW_%'] = ranking_df.apply(
                                 lambda r: ((r['Call Wall_num'] - r['Current Price_num']) / r['Current Price_num'] * 100) 
-                                if r['Current Price_num'] and r['Call Wall_num'] and r['Current Price_num'] > 0 else None, axis=1
+                                if pd.notna(r['Current Price_num']) and pd.notna(r['Call Wall_num']) and r['Current Price_num'] > 0 else None, axis=1
                             )
+                            ranking_df['Dist_to_CW_%'] = pd.to_numeric(ranking_df['Dist_to_CW_%'], errors='coerce')
+                        
                         if 'Current Price_num' in ranking_df.columns and 'Put Wall_num' in ranking_df.columns:
                             ranking_df['Dist_to_PW_%'] = ranking_df.apply(
                                 lambda r: ((r['Current Price_num'] - r['Put Wall_num']) / r['Current Price_num'] * 100) 
-                                if r['Current Price_num'] and r['Put Wall_num'] and r['Current Price_num'] > 0 else None, axis=1
+                                if pd.notna(r['Current Price_num']) and pd.notna(r['Put Wall_num']) and r['Current Price_num'] > 0 else None, axis=1
                             )
+                            ranking_df['Dist_to_PW_%'] = pd.to_numeric(ranking_df['Dist_to_PW_%'], errors='coerce')
                         
                         return ranking_df
                     
                     ranking_data = prepare_ranking_data(intraday_df)
+                    
+                    # 显示检测到的数据列（调试用）
+                    with st.expander("🔍 检测到的排行榜数据列"):
+                        detected_cols = [col for col in ranking_data.columns if col.endswith('_num') or col.startswith('Dist_')]
+                        st.write(detected_cols)
                     
                     # 排行榜选择
                     ranking_tabs = st.tabs([
