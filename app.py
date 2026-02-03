@@ -2890,14 +2890,15 @@ def main():
     st.title("🎯 股票波段期权筛选系统")
     st.caption(f"更新时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
         "📈 QQQ/NQ分析", 
         "📊 Equity Hub", 
         "📅 周五到期Gamma",
         "🎯 日内多空预测",
         "📊 板块资金流", 
         "🔍 个股筛选", 
-        "🎯 综合名单"
+        "🎯 综合名单",
+        "📡 100股追踪"
     ])
     
     # ========== Tab 1: QQQ/NQ盘前分析 ==========
@@ -6956,6 +6957,363 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
             - ⚠️ 多头踩踏: DR>-1 + 高VR + 近CW
             - ⚠️ 深度负Gamma区: 价格远低于HW
             """)
+
+    # ========== Tab 8: 100股追踪 ==========
+    with tab8:
+        st.header("📡 100只期权追踪系统")
+        st.caption("追踪100只热门股票的期权数据变化，发现交易机会")
+        
+        # 100只股票清单
+        WATCHLIST_100 = {
+            'MAG7': ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META', 'NVDA', 'TSLA'],
+            'AI_SEMI': ['AMD', 'INTC', 'MU', 'AVGO', 'TSM', 'MRVL', 'LRCX', 'SMCI', 'ARM', 
+                        'PLTR', 'AI', 'APP', 'IONQ', 'RGTI', 'SOUN'],
+            'CRYPTO': ['IBIT', 'MSTR', 'MARA', 'COIN', 'RIOT', 'CLSK', 'WULF', 'IREN', 'CORZ', 'GLXY'],
+            'MEME_GROWTH': ['GME', 'AMC', 'SOFI', 'HOOD', 'RIVN', 'NIO', 'RKLB', 'JOBY', 'LUNR', 
+                           'ACHR', 'CVNA', 'DKNG', 'HIMS', 'ASTS', 'OKLO'],
+            'SOFTWARE': ['CRM', 'NOW', 'ORCL', 'SHOP', 'SNOW', 'NET', 'DDOG', 'CRWD', 'ZS', 'MDB'],
+            'CONSUMER': ['NFLX', 'DIS', 'UBER', 'SNAP', 'SPOT', 'ABNB', 'BA', 'LUV'],
+            'FINANCE': ['JPM', 'BAC', 'C', 'PYPL', 'SQ'],
+            'ENERGY': ['XOM', 'CVX', 'OXY', 'FCX', 'AA', 'MP', 'SMR', 'BE'],
+            'GOLD_SILVER': ['GLD', 'SLV', 'GDX', 'AG', 'NEM', 'KGC', 'AEM', 'GOLD'],
+            'CHINA': ['BABA', 'JD', 'PDD', 'XPEV', 'LI', 'BILI', 'TAL', 'KWEB'],
+            'ETF_INDEX': ['SPY', 'SPX', 'QQQ', 'IWM', 'SOXL', 'VIX'],
+        }
+        
+        def get_watchlist_flat():
+            all_stocks = []
+            for sector, stocks in WATCHLIST_100.items():
+                for s in stocks:
+                    if s not in all_stocks:
+                        all_stocks.append(s)
+            return all_stocks
+        
+        def get_sector_100(symbol):
+            for sector, stocks in WATCHLIST_100.items():
+                if symbol in stocks:
+                    return sector
+            return 'OTHER'
+        
+        # 显示清单
+        with st.expander("📋 100只追踪清单", expanded=False):
+            for sector, stocks in WATCHLIST_100.items():
+                st.markdown(f"**{sector}** ({len(stocks)}): {', '.join(stocks)}")
+            st.info(f"总计: {len(get_watchlist_flat())} 只股票")
+        
+        # 上传CSV
+        tracker_file = st.file_uploader(
+            "上传每日期权数据CSV（支持Top200或完整5000只）",
+            type=['csv', 'xlsx'],
+            key='tracker_upload',
+            help="上传SpotGamma Equity Hub导出的CSV文件"
+        )
+        
+        # 日期选择
+        data_date = st.date_input(
+            "数据日期",
+            value=datetime.now().date(),
+            key='tracker_date'
+        )
+        date_str = data_date.strftime('%Y-%m-%d')
+        
+        if tracker_file:
+            try:
+                # 读取数据
+                if tracker_file.name.endswith('.xlsx'):
+                    tracker_df = pd.read_excel(tracker_file)
+                else:
+                    tracker_df = pd.read_csv(tracker_file)
+                
+                st.success(f"✅ 已加载 {len(tracker_df)} 只标的")
+                
+                # 提取100只股票数据
+                watchlist = get_watchlist_flat()
+                df_100 = tracker_df[tracker_df['Symbol'].isin(watchlist)].copy()
+                
+                found_symbols = df_100['Symbol'].tolist()
+                missing = [s for s in watchlist if s not in found_symbols]
+                
+                st.info(f"📊 匹配到 {len(df_100)}/100 只追踪股票 | 缺失: {len(missing)} 只")
+                
+                if missing:
+                    with st.expander(f"⚠️ 缺失的股票 ({len(missing)})"):
+                        st.write(missing)
+                
+                # 解析数据
+                def parse_tracker_data(row):
+                    symbol = row.get('Symbol', '')
+                    price = parse_number_safe(row.get('Current Price'))
+                    
+                    # DPI解析
+                    dpi_raw = row.get('% DPI Volume')
+                    dpi = parse_number_safe(dpi_raw)
+                    if dpi is not None and 0 <= dpi <= 1:
+                        dpi = dpi * 100
+                    
+                    dpi_5d_raw = row.get('5d % DPI Volume') or row.get('5 day DPI')
+                    dpi_5d = parse_number_safe(dpi_5d_raw)
+                    if dpi_5d is not None and 0 <= dpi_5d <= 1:
+                        dpi_5d = dpi_5d * 100
+                    
+                    cw = parse_number_safe(row.get('Call Wall'))
+                    pw = parse_number_safe(row.get('Put Wall'))
+                    
+                    dist_cw = None
+                    dist_pw = None
+                    if price and cw and price > 0:
+                        dist_cw = round((cw - price) / price * 100, 2)
+                    if price and pw and price > 0:
+                        dist_pw = round((price - pw) / price * 100, 2)
+                    
+                    return {
+                        'Symbol': symbol,
+                        'Sector': get_sector_100(symbol),
+                        'Price': price,
+                        'Call_Wall': cw,
+                        'Put_Wall': pw,
+                        'Dist_CW%': dist_cw,
+                        'Dist_PW%': dist_pw,
+                        'Delta_Ratio': parse_number_safe(row.get('Delta Ratio')),
+                        'Gamma_Ratio': parse_number_safe(row.get('Gamma Ratio')),
+                        'Volume_Ratio': parse_number_safe(row.get('Volume Ratio')),
+                        'DPI%': dpi,
+                        '5d_DPI%': dpi_5d,
+                        'Next_Exp_Gamma': parse_number_safe(row.get('Next Exp Gamma')),
+                        'IV_Rank': parse_number_safe(row.get('IV Rank')),
+                        'Implied_Move': parse_number_safe(row.get('Options Implied Move')),
+                        'Options_Impact': parse_number_safe(row.get('Options Impact')),
+                    }
+                
+                parsed_data = [parse_tracker_data(row) for _, row in df_100.iterrows()]
+                parsed_df = pd.DataFrame(parsed_data)
+                
+                # ========== 生成信号 ==========
+                st.subheader("📊 今日信号")
+                
+                signals = []
+                
+                for _, row in parsed_df.iterrows():
+                    symbol = row['Symbol']
+                    sector = row['Sector']
+                    price = row['Price']
+                    dpi = row.get('DPI%')
+                    dpi_5d = row.get('5d_DPI%')
+                    delta_ratio = row.get('Delta_Ratio')
+                    gamma_ratio = row.get('Gamma_Ratio')
+                    volume_ratio = row.get('Volume_Ratio')
+                    dist_cw = row.get('Dist_CW%')
+                    dist_pw = row.get('Dist_PW%')
+                    next_exp_gamma = row.get('Next_Exp_Gamma')
+                    iv_rank = row.get('IV_Rank')
+                    options_impact = row.get('Options_Impact')
+                    
+                    # 做多信号
+                    if dpi and dpi > 55:
+                        if dpi_5d and dpi_5d > 52:
+                            signals.append({
+                                'Symbol': symbol, 'Sector': sector, 'Type': '🚀 做多',
+                                'Signal': '机构持续买入',
+                                'Reason': f'DPI {dpi:.1f}%, 5日 {dpi_5d:.1f}%',
+                                'Style': 'Swing', 'OI%': options_impact
+                            })
+                        else:
+                            signals.append({
+                                'Symbol': symbol, 'Sector': sector, 'Type': '🚀 做多',
+                                'Signal': '机构当日买入',
+                                'Reason': f'DPI {dpi:.1f}%',
+                                'Style': 'Day/Swing', 'OI%': options_impact
+                            })
+                    
+                    if dist_pw is not None and 0 < dist_pw < 3 and dpi and dpi > 50:
+                        signals.append({
+                            'Symbol': symbol, 'Sector': sector, 'Type': '🚀 做多',
+                            'Signal': '支撑位抄底',
+                            'Reason': f'距PW {dist_pw:.1f}%, DPI {dpi:.1f}%',
+                            'Style': 'Day', 'OI%': options_impact
+                        })
+                    
+                    if next_exp_gamma and next_exp_gamma > 25 and gamma_ratio and gamma_ratio < 0.8:
+                        if dist_cw is not None and 0 < dist_cw < 5:
+                            signals.append({
+                                'Symbol': symbol, 'Sector': sector, 'Type': '⚡ Squeeze',
+                                'Signal': 'Gamma Squeeze预警',
+                                'Reason': f'NEG {next_exp_gamma:.1f}%, GR {gamma_ratio:.2f}, 距CW {dist_cw:.1f}%',
+                                'Style': 'Day', 'OI%': options_impact
+                            })
+                    
+                    if delta_ratio and delta_ratio < -5 and dpi and dpi > 48:
+                        signals.append({
+                            'Symbol': symbol, 'Sector': sector, 'Type': '🚀 做多',
+                            'Signal': '超卖反弹',
+                            'Reason': f'DR {delta_ratio:.2f}, DPI {dpi:.1f}%',
+                            'Style': 'Swing', 'OI%': options_impact
+                        })
+                    
+                    # 做空信号
+                    if dpi and dpi < 45:
+                        if dpi_5d and dpi_5d < 48:
+                            signals.append({
+                                'Symbol': symbol, 'Sector': sector, 'Type': '💀 做空',
+                                'Signal': '机构持续卖出',
+                                'Reason': f'DPI {dpi:.1f}%, 5日 {dpi_5d:.1f}%',
+                                'Style': 'Swing', 'OI%': options_impact
+                            })
+                    
+                    if dist_cw is not None and 0 < dist_cw < 3 and dpi and dpi < 50:
+                        if volume_ratio and volume_ratio > 1.2:
+                            signals.append({
+                                'Symbol': symbol, 'Sector': sector, 'Type': '💀 做空',
+                                'Signal': '阻力位压制',
+                                'Reason': f'距CW {dist_cw:.1f}%, DPI {dpi:.1f}%, VR {volume_ratio:.2f}',
+                                'Style': 'Day', 'OI%': options_impact
+                            })
+                    
+                    # 特殊信号
+                    if iv_rank and iv_rank > 80:
+                        signals.append({
+                            'Symbol': symbol, 'Sector': sector, 'Type': '📈 IV高',
+                            'Signal': 'IV高位',
+                            'Reason': f'IV Rank {iv_rank:.1f}%',
+                            'Style': '卖方策略', 'OI%': options_impact
+                        })
+                    
+                    if next_exp_gamma and next_exp_gamma > 30:
+                        implied_move = row.get('Implied_Move')
+                        if implied_move and implied_move > 3:
+                            signals.append({
+                                'Symbol': symbol, 'Sector': sector, 'Type': '🌊 波动',
+                                'Signal': '大波动预警',
+                                'Reason': f'NEG {next_exp_gamma:.1f}%, IM ${implied_move:.2f}',
+                                'Style': '跨式策略', 'OI%': options_impact
+                            })
+                
+                signals_df = pd.DataFrame(signals)
+                
+                # 显示信号统计
+                if not signals_df.empty:
+                    col_stats = st.columns(5)
+                    with col_stats[0]:
+                        bullish = len(signals_df[signals_df['Type'] == '🚀 做多'])
+                        st.metric("🚀 做多", bullish)
+                    with col_stats[1]:
+                        bearish = len(signals_df[signals_df['Type'] == '💀 做空'])
+                        st.metric("💀 做空", bearish)
+                    with col_stats[2]:
+                        squeeze = len(signals_df[signals_df['Type'] == '⚡ Squeeze'])
+                        st.metric("⚡ Squeeze", squeeze)
+                    with col_stats[3]:
+                        iv_high = len(signals_df[signals_df['Type'] == '📈 IV高'])
+                        st.metric("📈 IV高", iv_high)
+                    with col_stats[4]:
+                        volatile = len(signals_df[signals_df['Type'] == '🌊 波动'])
+                        st.metric("🌊 波动", volatile)
+                    
+                    # 信号筛选
+                    signal_filter = st.selectbox(
+                        "筛选信号类型",
+                        ["全部", "🚀 做多", "💀 做空", "⚡ Squeeze", "📈 IV高", "🌊 波动"],
+                        key="tracker_signal_filter"
+                    )
+                    
+                    if signal_filter != "全部":
+                        display_signals = signals_df[signals_df['Type'] == signal_filter]
+                    else:
+                        display_signals = signals_df
+                    
+                    # 显示信号表格
+                    st.dataframe(
+                        display_signals[['Symbol', 'Sector', 'Type', 'Signal', 'Reason', 'Style', 'OI%']],
+                        hide_index=True,
+                        use_container_width=True
+                    )
+                else:
+                    st.info("今日无信号")
+                
+                st.divider()
+                
+                # ========== 完整数据表 ==========
+                st.subheader("📋 100只股票完整数据")
+                
+                # 板块筛选
+                sector_filter = st.selectbox(
+                    "筛选板块",
+                    ["全部"] + list(WATCHLIST_100.keys()),
+                    key="tracker_sector_filter"
+                )
+                
+                if sector_filter != "全部":
+                    display_df = parsed_df[parsed_df['Sector'] == sector_filter]
+                else:
+                    display_df = parsed_df
+                
+                # 排序选项
+                sort_col = st.selectbox(
+                    "排序字段",
+                    ['DPI%', 'Delta_Ratio', 'Gamma_Ratio', 'Volume_Ratio', 'Dist_CW%', 'Dist_PW%', 'IV_Rank'],
+                    key="tracker_sort"
+                )
+                sort_asc = st.checkbox("升序", value=False, key="tracker_sort_asc")
+                
+                display_df_sorted = display_df.dropna(subset=[sort_col]).sort_values(sort_col, ascending=sort_asc)
+                
+                # 格式化显示
+                display_cols = ['Symbol', 'Sector', 'Price', 'DPI%', '5d_DPI%', 'Delta_Ratio', 
+                               'Gamma_Ratio', 'Volume_Ratio', 'Dist_CW%', 'Dist_PW%', 'Options_Impact']
+                
+                st.dataframe(
+                    display_df_sorted[display_cols].head(50),
+                    hide_index=True,
+                    use_container_width=True
+                )
+                
+                st.divider()
+                
+                # ========== 保存到Google Sheets ==========
+                st.subheader("☁️ 保存到Google Sheets")
+                
+                TRACKER_WS = "tracker_100_daily"
+                
+                col_save1, col_save2 = st.columns(2)
+                
+                with col_save1:
+                    if st.button("💾 保存今日数据", key="save_tracker_data", use_container_width=True):
+                        # 准备保存数据
+                        save_data = {}
+                        for _, row in parsed_df.iterrows():
+                            symbol = row['Symbol']
+                            row_dict = row.to_dict()
+                            row_dict['Date'] = date_str
+                            save_data[f"{date_str}_{symbol}"] = row_dict
+                        
+                        # 加载现有数据并合并
+                        existing = load_worksheet_data(TRACKER_WS) or {}
+                        existing.update(save_data)
+                        
+                        if save_worksheet_data(TRACKER_WS, existing):
+                            st.success(f"✅ 已保存 {len(parsed_df)} 条记录到 Google Sheets")
+                        else:
+                            st.error("❌ 保存失败")
+                
+                with col_save2:
+                    if st.button("📥 加载历史数据", key="load_tracker_history", use_container_width=True):
+                        history = load_worksheet_data(TRACKER_WS)
+                        if history:
+                            st.success(f"✅ 已加载 {len(history)} 条历史记录")
+                            
+                            # 转换为DataFrame显示
+                            history_df = pd.DataFrame(list(history.values()))
+                            if not history_df.empty and 'Date' in history_df.columns:
+                                dates = sorted(history_df['Date'].unique(), reverse=True)
+                                st.write(f"包含日期: {dates[:10]}")
+                        else:
+                            st.warning("无历史数据")
+                
+            except Exception as e:
+                st.error(f"❌ 处理失败: {e}")
+                import traceback
+                st.code(traceback.format_exc())
+        else:
+            st.info("👆 请上传每日期权数据CSV文件")
 
 
 if __name__ == "__main__":
