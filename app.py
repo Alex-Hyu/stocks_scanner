@@ -4159,7 +4159,7 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                 if not top_dpi.empty:
                                     display_df = top_dpi[['Ticker', '%DPI Volume_num']].copy()
                                     display_df.columns = ['股票', 'DPI%']
-                                    display_df['DPI%'] = display_df['DPI%'].apply(lambda x: f"{x:.1f}%" if x else "N/A")
+                                    display_df['DPI%'] = display_df['DPI%'].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A")
                                     st.dataframe(display_df, hide_index=True, use_container_width=True)
                                 else:
                                     st.info("无数据")
@@ -4174,7 +4174,7 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                 if not bottom_dpi.empty:
                                     display_df = bottom_dpi[['Ticker', '%DPI Volume_num']].copy()
                                     display_df.columns = ['股票', 'DPI%']
-                                    display_df['DPI%'] = display_df['DPI%'].apply(lambda x: f"{x:.1f}%" if x else "N/A")
+                                    display_df['DPI%'] = display_df['DPI%'].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A")
                                     st.dataframe(display_df, hide_index=True, use_container_width=True)
                                 else:
                                     st.info("无数据")
@@ -4191,7 +4191,7 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                 if not top_5d.empty:
                                     display_df = top_5d[['Ticker', '5 day DPI_num']].copy()
                                     display_df.columns = ['股票', '5日DPI%']
-                                    display_df['5日DPI%'] = display_df['5日DPI%'].apply(lambda x: f"{x:.1f}%" if x else "N/A")
+                                    display_df['5日DPI%'] = display_df['5日DPI%'].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A")
                                     st.dataframe(display_df, hide_index=True, use_container_width=True)
                                 else:
                                     st.info("无数据")
@@ -4206,7 +4206,7 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                 if not bottom_5d.empty:
                                     display_df = bottom_5d[['Ticker', '5 day DPI_num']].copy()
                                     display_df.columns = ['股票', '5日DPI%']
-                                    display_df['5日DPI%'] = display_df['5日DPI%'].apply(lambda x: f"{x:.1f}%" if x else "N/A")
+                                    display_df['5日DPI%'] = display_df['5日DPI%'].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A")
                                     st.dataframe(display_df, hide_index=True, use_container_width=True)
                                 else:
                                     st.info("无数据")
@@ -4227,7 +4227,7 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                 if not top_vr.empty:
                                     display_df = top_vr[['Ticker', 'Volume Ratio_num']].copy()
                                     display_df.columns = ['股票', 'Vol Ratio']
-                                    display_df['Vol Ratio'] = display_df['Vol Ratio'].apply(lambda x: f"{x:.2f}" if x else "N/A")
+                                    display_df['Vol Ratio'] = display_df['Vol Ratio'].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "N/A")
                                     st.dataframe(display_df, hide_index=True, use_container_width=True)
                                 else:
                                     st.info("无数据")
@@ -4244,7 +4244,7 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                 if not bottom_vr.empty:
                                     display_df = bottom_vr[['Ticker', 'Volume Ratio_num']].copy()
                                     display_df.columns = ['股票', 'Vol Ratio']
-                                    display_df['Vol Ratio'] = display_df['Vol Ratio'].apply(lambda x: f"{x:.2f}" if x else "N/A")
+                                    display_df['Vol Ratio'] = display_df['Vol Ratio'].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "N/A")
                                     st.dataframe(display_df, hide_index=True, use_container_width=True)
                                 else:
                                     st.info("无数据")
@@ -4259,7 +4259,7 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                 if not top_oi.empty:
                                     display_df = top_oi[['Ticker', 'Options Impact_num']].copy()
                                     display_df.columns = ['股票', 'OI%']
-                                    display_df['OI%'] = display_df['OI%'].apply(lambda x: f"{x:.1f}%" if x else "N/A")
+                                    display_df['OI%'] = display_df['OI%'].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A")
                                     st.dataframe(display_df, hide_index=True, use_container_width=True)
                                 else:
                                     st.info("无数据")
@@ -4272,11 +4272,13 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                             st.markdown("##### Delta Ratio 最负 Top10")
                             st.caption("极度偏空，可能超卖反弹")
                             if 'Delta Ratio_num' in ranking_data.columns:
-                                most_neg_dr = ranking_data.dropna(subset=['Delta Ratio_num']).nsmallest(10, 'Delta Ratio_num')
+                                # Delta Ratio是负数，dropna后直接取最小的10个
+                                dr_data = ranking_data[['Ticker', 'Delta Ratio_num']].dropna(subset=['Delta Ratio_num'])
+                                most_neg_dr = dr_data.nsmallest(10, 'Delta Ratio_num')
                                 if not most_neg_dr.empty:
-                                    display_df = most_neg_dr[['Ticker', 'Delta Ratio_num']].copy()
+                                    display_df = most_neg_dr.copy()
                                     display_df.columns = ['股票', 'Delta Ratio']
-                                    display_df['Delta Ratio'] = display_df['Delta Ratio'].apply(lambda x: f"{x:.2f}" if x else "N/A")
+                                    display_df['Delta Ratio'] = display_df['Delta Ratio'].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "N/A")
                                     st.dataframe(display_df, hide_index=True, use_container_width=True)
                                 else:
                                     st.info("无数据")
@@ -4287,11 +4289,12 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                             st.markdown("##### Gamma Ratio 最高 Top10")
                             st.caption("Put Gamma主导，下跌加速")
                             if 'Gamma Ratio_num' in ranking_data.columns:
-                                top_gr = ranking_data.dropna(subset=['Gamma Ratio_num']).nlargest(10, 'Gamma Ratio_num')
+                                gr_data = ranking_data[['Ticker', 'Gamma Ratio_num']].dropna(subset=['Gamma Ratio_num'])
+                                top_gr = gr_data.nlargest(10, 'Gamma Ratio_num')
                                 if not top_gr.empty:
-                                    display_df = top_gr[['Ticker', 'Gamma Ratio_num']].copy()
+                                    display_df = top_gr.copy()
                                     display_df.columns = ['股票', 'Gamma Ratio']
-                                    display_df['Gamma Ratio'] = display_df['Gamma Ratio'].apply(lambda x: f"{x:.2f}" if x else "N/A")
+                                    display_df['Gamma Ratio'] = display_df['Gamma Ratio'].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "N/A")
                                     st.dataframe(display_df, hide_index=True, use_container_width=True)
                                 else:
                                     st.info("无数据")
@@ -4307,7 +4310,7 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                 if not bottom_gr.empty:
                                     display_df = bottom_gr[['Ticker', 'Gamma Ratio_num']].copy()
                                     display_df.columns = ['股票', 'Gamma Ratio']
-                                    display_df['Gamma Ratio'] = display_df['Gamma Ratio'].apply(lambda x: f"{x:.2f}" if x else "N/A")
+                                    display_df['Gamma Ratio'] = display_df['Gamma Ratio'].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "N/A")
                                     st.dataframe(display_df, hide_index=True, use_container_width=True)
                                 else:
                                     st.info("无数据")
@@ -4324,7 +4327,7 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                 if not top_neg.empty:
                                     display_df = top_neg[['Ticker', 'Next Exp Gamma_num']].copy()
                                     display_df.columns = ['股票', 'NEG%']
-                                    display_df['NEG%'] = display_df['NEG%'].apply(lambda x: f"{x:.1f}%" if x else "N/A")
+                                    display_df['NEG%'] = display_df['NEG%'].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A")
                                     st.dataframe(display_df, hide_index=True, use_container_width=True)
                                 else:
                                     st.info("无数据")
@@ -4339,7 +4342,7 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                 if not top_iv.empty:
                                     display_df = top_iv[['Ticker', 'IV Rank_num']].copy()
                                     display_df.columns = ['股票', 'IV Rank']
-                                    display_df['IV Rank'] = display_df['IV Rank'].apply(lambda x: f"{x:.1f}" if x else "N/A")
+                                    display_df['IV Rank'] = display_df['IV Rank'].apply(lambda x: f"{x:.1f}" if pd.notna(x) else "N/A")
                                     st.dataframe(display_df, hide_index=True, use_container_width=True)
                                 else:
                                     st.info("无数据")
@@ -4354,7 +4357,7 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                 if not top_im.empty:
                                     display_df = top_im[['Ticker', 'Options Implied Move_num']].copy()
                                     display_df.columns = ['股票', 'Implied Move']
-                                    display_df['Implied Move'] = display_df['Implied Move'].apply(lambda x: f"${x:.2f}" if x else "N/A")
+                                    display_df['Implied Move'] = display_df['Implied Move'].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "N/A")
                                     st.dataframe(display_df, hide_index=True, use_container_width=True)
                                 else:
                                     st.info("无数据")
@@ -4376,9 +4379,9 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                 if not near_cw.empty:
                                     display_df = near_cw[['Ticker', 'Current Price_num', 'Call Wall_num', 'Dist_to_CW_%']].copy()
                                     display_df.columns = ['股票', '当前价', 'Call Wall', '距离%']
-                                    display_df['当前价'] = display_df['当前价'].apply(lambda x: f"${x:.2f}" if x else "N/A")
-                                    display_df['Call Wall'] = display_df['Call Wall'].apply(lambda x: f"${x:.2f}" if x else "N/A")
-                                    display_df['距离%'] = display_df['距离%'].apply(lambda x: f"+{x:.1f}%" if x else "N/A")
+                                    display_df['当前价'] = display_df['当前价'].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "N/A")
+                                    display_df['Call Wall'] = display_df['Call Wall'].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "N/A")
+                                    display_df['距离%'] = display_df['距离%'].apply(lambda x: f"+{x:.1f}%" if pd.notna(x) else "N/A")
                                     st.dataframe(display_df, hide_index=True, use_container_width=True)
                                 else:
                                     st.info("无数据")
@@ -4394,9 +4397,9 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                 if not near_pw.empty:
                                     display_df = near_pw[['Ticker', 'Current Price_num', 'Put Wall_num', 'Dist_to_PW_%']].copy()
                                     display_df.columns = ['股票', '当前价', 'Put Wall', '距离%']
-                                    display_df['当前价'] = display_df['当前价'].apply(lambda x: f"${x:.2f}" if x else "N/A")
-                                    display_df['Put Wall'] = display_df['Put Wall'].apply(lambda x: f"${x:.2f}" if x else "N/A")
-                                    display_df['距离%'] = display_df['距离%'].apply(lambda x: f"+{x:.1f}%" if x else "N/A")
+                                    display_df['当前价'] = display_df['当前价'].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "N/A")
+                                    display_df['Put Wall'] = display_df['Put Wall'].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "N/A")
+                                    display_df['距离%'] = display_df['距离%'].apply(lambda x: f"+{x:.1f}%" if pd.notna(x) else "N/A")
                                     st.dataframe(display_df, hide_index=True, use_container_width=True)
                                 else:
                                     st.info("无数据")
@@ -4413,9 +4416,9 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                 if not most_room_up.empty:
                                     display_df = most_room_up[['Ticker', 'Current Price_num', 'Call Wall_num', 'Dist_to_CW_%']].copy()
                                     display_df.columns = ['股票', '当前价', 'Call Wall', '上涨空间%']
-                                    display_df['当前价'] = display_df['当前价'].apply(lambda x: f"${x:.2f}" if x else "N/A")
-                                    display_df['Call Wall'] = display_df['Call Wall'].apply(lambda x: f"${x:.2f}" if x else "N/A")
-                                    display_df['上涨空间%'] = display_df['上涨空间%'].apply(lambda x: f"+{x:.1f}%" if x else "N/A")
+                                    display_df['当前价'] = display_df['当前价'].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "N/A")
+                                    display_df['Call Wall'] = display_df['Call Wall'].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "N/A")
+                                    display_df['上涨空间%'] = display_df['上涨空间%'].apply(lambda x: f"+{x:.1f}%" if pd.notna(x) else "N/A")
                                     st.dataframe(display_df, hide_index=True, use_container_width=True)
                                 else:
                                     st.info("无数据")
@@ -4430,9 +4433,9 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                 if not most_room_down.empty:
                                     display_df = most_room_down[['Ticker', 'Current Price_num', 'Put Wall_num', 'Dist_to_PW_%']].copy()
                                     display_df.columns = ['股票', '当前价', 'Put Wall', '下跌空间%']
-                                    display_df['当前价'] = display_df['当前价'].apply(lambda x: f"${x:.2f}" if x else "N/A")
-                                    display_df['Put Wall'] = display_df['Put Wall'].apply(lambda x: f"${x:.2f}" if x else "N/A")
-                                    display_df['下跌空间%'] = display_df['下跌空间%'].apply(lambda x: f"+{x:.1f}%" if x else "N/A")
+                                    display_df['当前价'] = display_df['当前价'].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "N/A")
+                                    display_df['Put Wall'] = display_df['Put Wall'].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "N/A")
+                                    display_df['下跌空间%'] = display_df['下跌空间%'].apply(lambda x: f"+{x:.1f}%" if pd.notna(x) else "N/A")
                                     st.dataframe(display_df, hide_index=True, use_container_width=True)
                                 else:
                                     st.info("无数据")
