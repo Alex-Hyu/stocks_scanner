@@ -7636,7 +7636,8 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                         display_df['WT1'] = display_df['WT1'].apply(lambda x: f"{x:.1f}" if pd.notna(x) else "N/A")
                     if 'RSI' in display_df.columns:
                         display_df['RSI'] = display_df['RSI'].apply(lambda x: f"{x:.0f}" if pd.notna(x) else "N/A")
-                    display_df['DPI%'] = display_df['DPI%'].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A")
+                    if 'DPI%' in display_df.columns:
+                        display_df['DPI%'] = display_df['DPI%'].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A")
                     
                     st.dataframe(display_df, hide_index=True, use_container_width=True)
                     
