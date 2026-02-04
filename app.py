@@ -6970,7 +6970,7 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
     # ========== Tab 8: 100股追踪 ==========
     with tab8:
         st.header("📡 100只期权追踪系统")
-        st.caption("追踪期权结构变化趋势，基于Delta/Gamma/Volume Ratio和价格位置生成信号")
+        st.caption("期权结构 + 技术面(WT/RSI)交叉验证，提高信号准确度")
         
         # 100只股票清单
         WATCHLIST_100 = {
@@ -7003,39 +7003,146 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                     return sector
             return 'OTHER'
         
+        # ========== 技术指标计算函数 ==========
+        def calc_wavetrend(df, n1=10, n2=21):
+            """计算WaveTrend指标"""
+            ap = (df['High'] + df['Low'] + df['Close']) / 3
+            esa = ap.ewm(span=n1, adjust=False).mean()
+            d = (ap - esa).abs().ewm(span=n1, adjust=False).mean()
+            d = d.replace(0, np.nan)
+            ci = (ap - esa) / (0.015 * d)
+            wt1 = ci.ewm(span=n2, adjust=False).mean()
+            wt2 = wt1.rolling(window=4).mean()
+            return wt1, wt2
+        
+        def calc_rsi(df, period=14):
+            """计算RSI"""
+            delta = df['Close'].diff()
+            gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+            rs = gain / loss
+            rsi = 100 - (100 / (1 + rs))
+            return rsi
+        
+        @st.cache_data(ttl=300)
+        def get_technical_indicators(symbol):
+            """获取单只股票的技术指标"""
+            try:
+                ticker = yf.Ticker(symbol)
+                df = ticker.history(period="3mo")
+                
+                if len(df) < 50:
+                    return None
+                
+                wt1, wt2 = calc_wavetrend(df)
+                rsi = calc_rsi(df)
+                
+                if wt1.isna().iloc[-1]:
+                    return None
+                
+                current_wt1 = wt1.iloc[-1]
+                current_wt2 = wt2.iloc[-1]
+                prev_wt1 = wt1.iloc[-2] if len(wt1) > 1 else current_wt1
+                current_rsi = rsi.iloc[-1]
+                
+                # WT方向
+                wt_direction = "↑" if current_wt1 > prev_wt1 else "↓" if current_wt1 < prev_wt1 else "→"
+                
+                # 金叉/死叉
+                prev_wt2 = wt2.iloc[-2] if len(wt2) > 1 else current_wt2
+                cross = ""
+                if current_wt1 > current_wt2 and prev_wt1 <= prev_wt2:
+                    cross = "金叉"
+                elif current_wt1 < current_wt2 and prev_wt1 >= prev_wt2:
+                    cross = "死叉"
+                
+                # WT状态判断
+                if current_wt1 <= -60:
+                    wt_status = "超卖"
+                elif current_wt1 <= -53:
+                    wt_status = "接近超卖"
+                elif current_wt1 >= 60:
+                    wt_status = "超买"
+                elif current_wt1 >= 53:
+                    wt_status = "接近超买"
+                else:
+                    wt_status = "中性"
+                
+                return {
+                    'WT1': round(current_wt1, 2),
+                    'WT2': round(current_wt2, 2),
+                    'WT_Dir': wt_direction,
+                    'WT_Cross': cross,
+                    'WT_Status': wt_status,
+                    'RSI': round(current_rsi, 1),
+                }
+            except Exception as e:
+                return None
+        
+        def get_tech_confirmation(options_signal_type, wt_status, wt_dir, rsi, cross):
+            """
+            判断技术面是否确认期权信号
+            
+            返回: (确认状态, 加分, 说明)
+            """
+            if options_signal_type == 'bullish':  # 期权做多信号
+                # 最佳确认：WT超卖 + RSI<30 + 拐头向上
+                if wt_status in ['超卖', '接近超卖']:
+                    if rsi and rsi < 30:
+                        if wt_dir == '↑' or cross == '金叉':
+                            return '✅强确认', 3, f'WT{wt_status}+RSI{rsi:.0f}+{wt_dir}'
+                        return '✅确认', 2, f'WT{wt_status}+RSI{rsi:.0f}'
+                    return '✅确认', 1, f'WT{wt_status}'
+                elif wt_status == '中性':
+                    if wt_dir == '↑':
+                        return '➖待确认', 0, f'WT中性{wt_dir}'
+                    return '➖中性', 0, 'WT中性'
+                else:  # WT超买
+                    return '⚠️冲突', -2, f'⚠️WT{wt_status}追高风险'
+            
+            elif options_signal_type == 'bearish':  # 期权做空信号
+                # 最佳确认：WT超买 + RSI>70 + 拐头向下
+                if wt_status in ['超买', '接近超买']:
+                    if rsi and rsi > 70:
+                        if wt_dir == '↓' or cross == '死叉':
+                            return '✅强确认', 3, f'WT{wt_status}+RSI{rsi:.0f}+{wt_dir}'
+                        return '✅确认', 2, f'WT{wt_status}+RSI{rsi:.0f}'
+                    return '✅确认', 1, f'WT{wt_status}'
+                elif wt_status == '中性':
+                    if wt_dir == '↓':
+                        return '➖待确认', 0, f'WT中性{wt_dir}'
+                    return '➖中性', 0, 'WT中性'
+                else:  # WT超卖
+                    return '⚠️冲突', -2, f'⚠️WT{wt_status}抄底风险'
+            
+            return '➖', 0, ''
+        
         # 信号逻辑说明
         with st.expander("📖 信号生成逻辑说明", expanded=False):
             st.markdown("""
-            ### 核心指标解读
+            ### 期权结构指标
             
             | 指标 | 含义 | 多头信号 | 空头信号 |
             |------|------|----------|----------|
             | **Delta Ratio** | Put/Call Delta比 | 向-1靠近（Call积累）| 远离-1（Put积累）|
             | **Gamma Ratio** | Put/Call Gamma比 | <1（Call Gamma主导）| >1.5（Put Gamma主导）|
             | **Volume Ratio** | Put/Call成交量比 | <0.8（Call活跃）| >1.5（Put活跃）|
-            | **价格位置** | 相对CW/PW/KG | 接近Put Wall | 接近Call Wall |
             
-            ### 信号类型
+            ### 技术面交叉验证（WT + RSI）
             
-            #### 🚀 做多信号
-            - **结构转多**: DR向-1靠近 + GR下降 + VR下降
-            - **突破蓄势**: 接近Call Wall + DR>-1.5 + GR<1
-            - **支撑确认**: 价格在Put Wall上方 + 结构偏多
-            - **超卖反弹**: DR极负(<-4) + GR/VR开始回落
+            | 期权信号 | 技术确认条件 | 综合评级 |
+            |----------|--------------|----------|
+            | 🚀 做多 | WT超卖 + RSI<30 + 拐头↑ | ⭐⭐⭐⭐⭐ 极强 |
+            | 🚀 做多 | WT超卖 + RSI<30 | ⭐⭐⭐⭐ 强 |
+            | 🚀 做多 | WT超卖 | ⭐⭐⭐ 中等 |
+            | 🚀 做多 | WT中性 | ⭐⭐ 待确认 |
+            | 🚀 做多 | WT超买 | ⚠️ 追高风险 |
+            | 💀 做空 | WT超买 + RSI>70 + 拐头↓ | ⭐⭐⭐⭐⭐ 极强 |
+            | 💀 做空 | WT超卖 | ⚠️ 抄底风险 |
             
-            #### 💀 做空信号
-            - **结构转空**: DR远离-1 + GR上升 + VR上升
-            - **阻力确认**: 接近Call Wall + DR<-2 + GR>1.5
-            - **破位预警**: 接近Put Wall + 结构偏空
-            
-            #### ⚡ 特殊信号
-            - **Squeeze预警**: DR极负 + 开始回归 + 接近Call Wall
-            - **Pin Risk**: 价格在Key Gamma附近 + NEG高
-            
-            ### 变化趋势（需要多日数据）
+            ### 变化趋势（需要多日期权数据）
             - DR变化 > 0.3: 显著转多
             - DR变化 < -0.3: 显著转空
-            - GR/VR连续同向变化: 趋势确认
             """)
         
         # 显示清单
@@ -7184,7 +7291,26 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                 # ========== 生成信号（基于结构分析） ==========
                 st.subheader("🎯 交易信号榜单")
                 
+                # 是否启用技术面验证
+                enable_tech = st.checkbox("🔬 启用技术面交叉验证 (WT + RSI)", value=True, key="enable_tech_validation")
+                
+                if enable_tech:
+                    st.caption("正在获取技术指标数据，首次加载可能需要几分钟...")
+                
                 signals = []
+                tech_cache = {}  # 缓存技术指标
+                
+                # 如果启用技术验证，先批量获取所有股票的技术指标
+                if enable_tech:
+                    progress_tech = st.progress(0, "获取技术指标...")
+                    symbols_to_fetch = today_df['Symbol'].tolist()
+                    for i, sym in enumerate(symbols_to_fetch):
+                        progress_tech.progress((i + 1) / len(symbols_to_fetch), f"获取 {sym} 技术指标...")
+                        tech_data = get_technical_indicators(sym)
+                        if tech_data:
+                            tech_cache[sym] = tech_data
+                    progress_tech.empty()
+                    st.success(f"✅ 成功获取 {len(tech_cache)}/{len(symbols_to_fetch)} 只股票的技术指标")
                 
                 for _, row in today_df.iterrows():
                     symbol = row['Symbol']
@@ -7205,6 +7331,14 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                     gr_chg = row.get('GR_Change')
                     vr_chg = row.get('VR_Change')
                     price_chg = row.get('Price_Change%')
+                    
+                    # 获取技术指标
+                    tech = tech_cache.get(symbol, {}) if enable_tech else {}
+                    wt1 = tech.get('WT1')
+                    wt_status = tech.get('WT_Status', '')
+                    wt_dir = tech.get('WT_Dir', '')
+                    wt_cross = tech.get('WT_Cross', '')
+                    rsi = tech.get('RSI')
                     
                     # 跳过无效数据
                     if dr is None or gr is None or vr is None:
@@ -7243,7 +7377,8 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                             'Signal': '结构偏多',
                             'Strength': strength,
                             'Reason': ' | '.join(reasons),
-                            'Style': 'Day/Swing'
+                            'Style': 'Day/Swing',
+                            'SignalDir': 'bullish'
                         })
                     
                     # 2. 结构转多（需要变化数据）
@@ -7254,7 +7389,8 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                 'Signal': '结构转多',
                                 'Strength': 5 if dr_chg > 0.5 else 3,
                                 'Reason': f"DR变化+{dr_chg:.2f} | GR变化{gr_chg:.2f}",
-                                'Style': 'Swing'
+                                'Style': 'Swing',
+                                'SignalDir': 'bullish'
                             })
                     
                     # 3. 突破蓄势（接近Call Wall + 结构支持）
@@ -7265,7 +7401,8 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                 'Signal': '突破蓄势',
                                 'Strength': 4 if dist_cw < 3 else 2,
                                 'Reason': f"距CW {dist_cw:.1f}% | DR={dr:.2f} | GR={gr:.2f}",
-                                'Style': 'Day'
+                                'Style': 'Day',
+                                'SignalDir': 'bullish'
                             })
                     
                     # 4. 支撑确认（在Put Wall上方 + 结构支持）
@@ -7276,7 +7413,8 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                 'Signal': '支撑确认',
                                 'Strength': 4 if dist_pw < 2 else 2,
                                 'Reason': f"距PW {dist_pw:.1f}% | DR={dr:.2f} | VR={vr:.2f}",
-                                'Style': 'Day/Swing'
+                                'Style': 'Day/Swing',
+                                'SignalDir': 'bullish'
                             })
                     
                     # 5. 超卖反弹（DR极负但开始回归）
@@ -7287,7 +7425,8 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                 'Signal': '超卖反弹',
                                 'Strength': 5,
                                 'Reason': f"DR={dr:.2f}极负 | 变化+{dr_chg:.2f}回归中",
-                                'Style': 'Swing'
+                                'Style': 'Swing',
+                                'SignalDir': 'bullish'
                             })
                     
                     # ========== 做空信号 ==========
@@ -7321,7 +7460,8 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                             'Signal': '结构偏空',
                             'Strength': strength,
                             'Reason': ' | '.join(reasons),
-                            'Style': 'Day/Swing'
+                            'Style': 'Day/Swing',
+                            'SignalDir': 'bearish'
                         })
                     
                     # 7. 结构转空（需要变化数据）
@@ -7332,7 +7472,8 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                 'Signal': '结构转空',
                                 'Strength': 5 if dr_chg < -0.5 else 3,
                                 'Reason': f"DR变化{dr_chg:.2f} | GR变化+{gr_chg:.2f}",
-                                'Style': 'Swing'
+                                'Style': 'Swing',
+                                'SignalDir': 'bearish'
                             })
                     
                     # 8. 阻力确认（接近Call Wall + 结构不支持）
@@ -7343,7 +7484,8 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                 'Signal': '阻力确认',
                                 'Strength': 4 if dist_cw < 2 else 2,
                                 'Reason': f"距CW {dist_cw:.1f}% | DR={dr:.2f} | GR={gr:.2f}",
-                                'Style': 'Day'
+                                'Style': 'Day',
+                                'SignalDir': 'bearish'
                             })
                     
                     # 9. 破位预警（接近Put Wall + 结构偏空）
@@ -7354,7 +7496,8 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                 'Signal': '破位预警',
                                 'Strength': 5,
                                 'Reason': f"距PW {dist_pw:.1f}% | DR={dr:.2f} | GR={gr:.2f}",
-                                'Style': 'Day'
+                                'Style': 'Day',
+                                'SignalDir': 'bearish'
                             })
                     
                     # ========== 特殊信号 ==========
@@ -7368,7 +7511,8 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                     'Signal': 'Squeeze预警',
                                     'Strength': 6,
                                     'Reason': f"DR={dr:.2f}极负 | 回归+{dr_chg:.2f} | 距CW {dist_cw:.1f}%",
-                                    'Style': 'Day'
+                                    'Style': 'Day',
+                                    'SignalDir': 'bullish'
                                 })
                     
                     # 11. Pin Risk（价格在Key Gamma附近）
@@ -7379,10 +7523,11 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                 'Signal': 'Pin Risk',
                                 'Strength': 3,
                                 'Reason': f"距KG {dist_kg:.1f}% | NEG={neg:.1f}%",
-                                'Style': '周五OPEX'
+                                'Style': '周五OPEX',
+                                'SignalDir': 'neutral'
                             })
                     
-                    # 添加到总信号
+                    # 添加到总信号（包含技术面验证）
                     for sig in stock_signals:
                         sig['Symbol'] = symbol
                         sig['Sector'] = sector
@@ -7392,15 +7537,39 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                         sig['VR'] = vr
                         sig['OI%'] = oi
                         sig['DPI%'] = dpi
+                        
+                        # 技术面数据
+                        sig['WT1'] = wt1
+                        sig['WT_Status'] = wt_status
+                        sig['WT_Dir'] = wt_dir
+                        sig['RSI'] = rsi
+                        
+                        # 技术面验证
+                        if enable_tech and wt_status:
+                            signal_dir = sig.get('SignalDir', 'neutral')
+                            tech_confirm, tech_bonus, tech_reason = get_tech_confirmation(
+                                signal_dir, wt_status, wt_dir, rsi, wt_cross
+                            )
+                            sig['Tech_Confirm'] = tech_confirm
+                            sig['Tech_Bonus'] = tech_bonus
+                            sig['Tech_Reason'] = tech_reason
+                            # 调整综合强度
+                            sig['Final_Strength'] = sig['Strength'] + tech_bonus
+                        else:
+                            sig['Tech_Confirm'] = '➖'
+                            sig['Tech_Bonus'] = 0
+                            sig['Tech_Reason'] = ''
+                            sig['Final_Strength'] = sig['Strength']
+                        
                         signals.append(sig)
                 
-                # 转换为DataFrame并按强度排序
+                # 转换为DataFrame并按综合强度排序
                 if signals:
                     signals_df = pd.DataFrame(signals)
-                    signals_df = signals_df.sort_values('Strength', ascending=False)
+                    signals_df = signals_df.sort_values('Final_Strength', ascending=False)
                     
                     # 统计
-                    col_stats = st.columns(5)
+                    col_stats = st.columns(6)
                     with col_stats[0]:
                         bullish = len(signals_df[signals_df['Type'] == '🚀 做多'])
                         st.metric("🚀 做多", bullish)
@@ -7414,10 +7583,13 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                         pin = len(signals_df[signals_df['Type'] == '📍 Pin'])
                         st.metric("📍 Pin", pin)
                     with col_stats[4]:
+                        confirmed = len(signals_df[signals_df['Tech_Confirm'].str.contains('✅', na=False)])
+                        st.metric("✅ 技术确认", confirmed)
+                    with col_stats[5]:
                         st.metric("📊 总信号", len(signals_df))
                     
                     # 筛选
-                    filter_col1, filter_col2 = st.columns(2)
+                    filter_col1, filter_col2, filter_col3 = st.columns(3)
                     with filter_col1:
                         signal_filter = st.selectbox(
                             "信号类型",
@@ -7425,23 +7597,45 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                             key="tracker_signal_filter"
                         )
                     with filter_col2:
-                        strength_filter = st.slider("最低强度", 0, 6, 2, key="tracker_strength_filter")
+                        strength_filter = st.slider("最低综合强度", -2, 9, 2, key="tracker_strength_filter")
+                    with filter_col3:
+                        tech_filter = st.selectbox(
+                            "技术确认",
+                            ["全部", "✅ 确认/强确认", "⚠️ 冲突"],
+                            key="tracker_tech_filter"
+                        )
                     
                     # 应用筛选
-                    display_signals = signals_df[signals_df['Strength'] >= strength_filter]
+                    display_signals = signals_df[signals_df['Final_Strength'] >= strength_filter]
                     if signal_filter != "全部":
                         display_signals = display_signals[display_signals['Type'] == signal_filter]
+                    if tech_filter == "✅ 确认/强确认":
+                        display_signals = display_signals[display_signals['Tech_Confirm'].str.contains('✅', na=False)]
+                    elif tech_filter == "⚠️ 冲突":
+                        display_signals = display_signals[display_signals['Tech_Confirm'].str.contains('⚠️', na=False)]
                     
                     # 显示榜单
                     st.markdown(f"### 📋 信号榜单 ({len(display_signals)} 条)")
                     
-                    display_cols = ['Symbol', 'Sector', 'Type', 'Signal', 'Strength', 'Reason', 'Style', 'DR', 'GR', 'VR', 'DPI%']
+                    # 选择显示列
+                    if enable_tech:
+                        display_cols = ['Symbol', 'Sector', 'Type', 'Signal', 'Final_Strength', 'Reason', 
+                                       'Tech_Confirm', 'WT1', 'RSI', 'Tech_Reason', 'Style']
+                    else:
+                        display_cols = ['Symbol', 'Sector', 'Type', 'Signal', 'Strength', 'Reason', 'Style', 'DR', 'GR', 'VR']
                     
                     # 格式化显示
                     display_df = display_signals[display_cols].copy()
-                    display_df['DR'] = display_df['DR'].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "N/A")
-                    display_df['GR'] = display_df['GR'].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "N/A")
-                    display_df['VR'] = display_df['VR'].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "N/A")
+                    if 'DR' in display_df.columns:
+                        display_df['DR'] = display_df['DR'].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "N/A")
+                    if 'GR' in display_df.columns:
+                        display_df['GR'] = display_df['GR'].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "N/A")
+                    if 'VR' in display_df.columns:
+                        display_df['VR'] = display_df['VR'].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "N/A")
+                    if 'WT1' in display_df.columns:
+                        display_df['WT1'] = display_df['WT1'].apply(lambda x: f"{x:.1f}" if pd.notna(x) else "N/A")
+                    if 'RSI' in display_df.columns:
+                        display_df['RSI'] = display_df['RSI'].apply(lambda x: f"{x:.0f}" if pd.notna(x) else "N/A")
                     display_df['DPI%'] = display_df['DPI%'].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A")
                     
                     st.dataframe(display_df, hide_index=True, use_container_width=True)
