@@ -1511,7 +1511,7 @@ def analyze_qqq_nq(premarket_data, csv_data=None):
 # ============================================================
 
 def parse_number_safe(value):
-    """安全解析数字"""
+    """安全解析数字 - 修复SpotGamma单引号负数格式"""
     if value is None:
         return None
     if pd.isna(value):
@@ -1519,7 +1519,16 @@ def parse_number_safe(value):
     if isinstance(value, (int, float)):
         return float(value)
     
-    value = str(value).strip().replace(',', '').replace("'", "-")
+    value = str(value).strip()
+    
+    # 关键修复：SpotGamma用开头的单引号表示负数
+    # 格式是 '-2.345，单引号后面已经有负号了
+    # 所以只需要移除开头的单引号，不能用replace替换所有单引号为负号
+    if value.startswith("'"):
+        value = value[1:]  # 移除开头的单引号，保留负号
+    
+    # 移除其他字符
+    value = value.replace(',', '').replace('%', '').replace('$', '')
     
     multipliers = {'K': 1e3, 'M': 1e6, 'B': 1e9, 'T': 1e12}
     
@@ -6961,7 +6970,7 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
     # ========== Tab 8: 100股追踪 ==========
     with tab8:
         st.header("📡 100只期权追踪系统")
-        st.caption("追踪100只热门股票的期权数据变化，发现交易机会")
+        st.caption("追踪期权结构变化趋势，基于Delta/Gamma/Volume Ratio和价格位置生成信号")
         
         # 100只股票清单
         WATCHLIST_100 = {
@@ -6994,203 +7003,403 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                     return sector
             return 'OTHER'
         
+        # 信号逻辑说明
+        with st.expander("📖 信号生成逻辑说明", expanded=False):
+            st.markdown("""
+            ### 核心指标解读
+            
+            | 指标 | 含义 | 多头信号 | 空头信号 |
+            |------|------|----------|----------|
+            | **Delta Ratio** | Put/Call Delta比 | 向-1靠近（Call积累）| 远离-1（Put积累）|
+            | **Gamma Ratio** | Put/Call Gamma比 | <1（Call Gamma主导）| >1.5（Put Gamma主导）|
+            | **Volume Ratio** | Put/Call成交量比 | <0.8（Call活跃）| >1.5（Put活跃）|
+            | **价格位置** | 相对CW/PW/KG | 接近Put Wall | 接近Call Wall |
+            
+            ### 信号类型
+            
+            #### 🚀 做多信号
+            - **结构转多**: DR向-1靠近 + GR下降 + VR下降
+            - **突破蓄势**: 接近Call Wall + DR>-1.5 + GR<1
+            - **支撑确认**: 价格在Put Wall上方 + 结构偏多
+            - **超卖反弹**: DR极负(<-4) + GR/VR开始回落
+            
+            #### 💀 做空信号
+            - **结构转空**: DR远离-1 + GR上升 + VR上升
+            - **阻力确认**: 接近Call Wall + DR<-2 + GR>1.5
+            - **破位预警**: 接近Put Wall + 结构偏空
+            
+            #### ⚡ 特殊信号
+            - **Squeeze预警**: DR极负 + 开始回归 + 接近Call Wall
+            - **Pin Risk**: 价格在Key Gamma附近 + NEG高
+            
+            ### 变化趋势（需要多日数据）
+            - DR变化 > 0.3: 显著转多
+            - DR变化 < -0.3: 显著转空
+            - GR/VR连续同向变化: 趋势确认
+            """)
+        
         # 显示清单
         with st.expander("📋 100只追踪清单", expanded=False):
             for sector, stocks in WATCHLIST_100.items():
                 st.markdown(f"**{sector}** ({len(stocks)}): {', '.join(stocks)}")
             st.info(f"总计: {len(get_watchlist_flat())} 只股票")
         
-        # 上传CSV
-        tracker_file = st.file_uploader(
-            "上传每日期权数据CSV（支持Top200或完整5000只）",
+        # 多文件上传
+        st.subheader("📤 上传数据")
+        st.caption("支持上传多天数据进行趋势对比（最新日期的文件放最后）")
+        
+        tracker_files = st.file_uploader(
+            "上传每日期权数据CSV（可多选）",
             type=['csv', 'xlsx'],
-            key='tracker_upload',
-            help="上传SpotGamma Equity Hub导出的CSV文件"
+            key='tracker_upload_multi',
+            accept_multiple_files=True,
+            help="上传SpotGamma Equity Hub导出的CSV文件，支持多天数据对比"
         )
         
-        # 日期选择
-        data_date = st.date_input(
-            "数据日期",
-            value=datetime.now().date(),
-            key='tracker_date'
-        )
-        date_str = data_date.strftime('%Y-%m-%d')
-        
-        if tracker_file:
+        if tracker_files:
             try:
-                # 读取数据
-                if tracker_file.name.endswith('.xlsx'):
-                    tracker_df = pd.read_excel(tracker_file)
-                else:
-                    tracker_df = pd.read_csv(tracker_file)
+                # 读取所有上传的文件
+                all_data = {}
+                for f in tracker_files:
+                    # 从文件名提取日期
+                    fname = f.name
+                    # 尝试从文件名解析日期 (如 Top200_2026-02-03.csv)
+                    import re
+                    date_match = re.search(r'(\d{4}-\d{2}-\d{2})', fname)
+                    if date_match:
+                        file_date = date_match.group(1)
+                    else:
+                        file_date = fname.replace('.csv', '').replace('.xlsx', '')
+                    
+                    if fname.endswith('.xlsx'):
+                        df = pd.read_excel(f)
+                    else:
+                        df = pd.read_csv(f)
+                    
+                    all_data[file_date] = df
+                    st.success(f"✅ {fname}: {len(df)} 条记录")
                 
-                st.success(f"✅ 已加载 {len(tracker_df)} 只标的")
+                # 按日期排序
+                sorted_dates = sorted(all_data.keys())
+                st.info(f"📅 已加载 {len(sorted_dates)} 天数据: {sorted_dates}")
                 
-                # 提取100只股票数据
+                # 获取最新日期的数据
+                latest_date = sorted_dates[-1]
+                latest_df = all_data[latest_date]
+                
+                # 获取前一天数据（如果有）
+                prev_df = None
+                prev_date = None
+                if len(sorted_dates) >= 2:
+                    prev_date = sorted_dates[-2]
+                    prev_df = all_data[prev_date]
+                
+                # 提取100只股票
                 watchlist = get_watchlist_flat()
-                df_100 = tracker_df[tracker_df['Symbol'].isin(watchlist)].copy()
                 
-                found_symbols = df_100['Symbol'].tolist()
-                missing = [s for s in watchlist if s not in found_symbols]
-                
-                st.info(f"📊 匹配到 {len(df_100)}/100 只追踪股票 | 缺失: {len(missing)} 只")
-                
-                if missing:
-                    with st.expander(f"⚠️ 缺失的股票 ({len(missing)})"):
-                        st.write(missing)
+                # 解析函数
+                def parse_stock_data(df, date_str):
+                    """解析单日数据"""
+                    df_filtered = df[df['Symbol'].isin(watchlist)].copy()
+                    
+                    results = []
+                    for _, row in df_filtered.iterrows():
+                        symbol = row.get('Symbol', '')
+                        price = parse_number_safe(row.get('Current Price'))
+                        cw = parse_number_safe(row.get('Call Wall'))
+                        pw = parse_number_safe(row.get('Put Wall'))
+                        kg = parse_number_safe(row.get('Key Gamma Strike'))
+                        hw = parse_number_safe(row.get('Hedge Wall'))
+                        
+                        # 计算距离
+                        dist_cw = round((cw - price) / price * 100, 2) if price and cw and price > 0 else None
+                        dist_pw = round((price - pw) / price * 100, 2) if price and pw and price > 0 else None
+                        dist_kg = round((kg - price) / price * 100, 2) if price and kg and price > 0 else None
+                        
+                        # DPI解析
+                        dpi = parse_number_safe(row.get('% DPI Volume'))
+                        if dpi is not None and 0 <= dpi <= 1:
+                            dpi = dpi * 100
+                        dpi_5d = parse_number_safe(row.get('5d % DPI Volume') or row.get('5 day DPI'))
+                        if dpi_5d is not None and 0 <= dpi_5d <= 1:
+                            dpi_5d = dpi_5d * 100
+                        
+                        results.append({
+                            'Date': date_str,
+                            'Symbol': symbol,
+                            'Sector': get_sector_100(symbol),
+                            'Price': price,
+                            'Call_Wall': cw,
+                            'Put_Wall': pw,
+                            'Key_Gamma': kg,
+                            'Hedge_Wall': hw,
+                            'Dist_CW%': dist_cw,
+                            'Dist_PW%': dist_pw,
+                            'Dist_KG%': dist_kg,
+                            'Delta_Ratio': parse_number_safe(row.get('Delta Ratio')),
+                            'Gamma_Ratio': parse_number_safe(row.get('Gamma Ratio')),
+                            'Volume_Ratio': parse_number_safe(row.get('Volume Ratio')),
+                            'DPI%': dpi,
+                            '5d_DPI%': dpi_5d,
+                            'Next_Exp_Gamma': parse_number_safe(row.get('Next Exp Gamma')),
+                            'Options_Impact': parse_number_safe(row.get('Options Impact')),
+                            'IV_Rank': parse_number_safe(row.get('IV Rank')),
+                        })
+                    
+                    return pd.DataFrame(results)
                 
                 # 解析数据
-                def parse_tracker_data(row):
-                    symbol = row.get('Symbol', '')
-                    price = parse_number_safe(row.get('Current Price'))
-                    
-                    # DPI解析
-                    dpi_raw = row.get('% DPI Volume')
-                    dpi = parse_number_safe(dpi_raw)
-                    if dpi is not None and 0 <= dpi <= 1:
-                        dpi = dpi * 100
-                    
-                    dpi_5d_raw = row.get('5d % DPI Volume') or row.get('5 day DPI')
-                    dpi_5d = parse_number_safe(dpi_5d_raw)
-                    if dpi_5d is not None and 0 <= dpi_5d <= 1:
-                        dpi_5d = dpi_5d * 100
-                    
-                    cw = parse_number_safe(row.get('Call Wall'))
-                    pw = parse_number_safe(row.get('Put Wall'))
-                    
-                    dist_cw = None
-                    dist_pw = None
-                    if price and cw and price > 0:
-                        dist_cw = round((cw - price) / price * 100, 2)
-                    if price and pw and price > 0:
-                        dist_pw = round((price - pw) / price * 100, 2)
-                    
-                    return {
-                        'Symbol': symbol,
-                        'Sector': get_sector_100(symbol),
-                        'Price': price,
-                        'Call_Wall': cw,
-                        'Put_Wall': pw,
-                        'Dist_CW%': dist_cw,
-                        'Dist_PW%': dist_pw,
-                        'Delta_Ratio': parse_number_safe(row.get('Delta Ratio')),
-                        'Gamma_Ratio': parse_number_safe(row.get('Gamma Ratio')),
-                        'Volume_Ratio': parse_number_safe(row.get('Volume Ratio')),
-                        'DPI%': dpi,
-                        '5d_DPI%': dpi_5d,
-                        'Next_Exp_Gamma': parse_number_safe(row.get('Next Exp Gamma')),
-                        'IV_Rank': parse_number_safe(row.get('IV Rank')),
-                        'Implied_Move': parse_number_safe(row.get('Options Implied Move')),
-                        'Options_Impact': parse_number_safe(row.get('Options Impact')),
-                    }
+                today_df = parse_stock_data(latest_df, latest_date)
+                yesterday_df = parse_stock_data(prev_df, prev_date) if prev_df is not None else None
                 
-                parsed_data = [parse_tracker_data(row) for _, row in df_100.iterrows()]
-                parsed_df = pd.DataFrame(parsed_data)
+                st.success(f"📊 最新数据 ({latest_date}): 匹配到 {len(today_df)} 只追踪股票")
                 
-                # ========== 生成信号 ==========
-                st.subheader("📊 今日信号")
+                # ========== 计算变化量 ==========
+                if yesterday_df is not None:
+                    # 合并今昨数据
+                    merged = today_df.merge(
+                        yesterday_df[['Symbol', 'Delta_Ratio', 'Gamma_Ratio', 'Volume_Ratio', 'Price', 'DPI%']],
+                        on='Symbol',
+                        suffixes=('', '_prev'),
+                        how='left'
+                    )
+                    
+                    # 计算变化
+                    merged['DR_Change'] = merged['Delta_Ratio'] - merged['Delta_Ratio_prev']
+                    merged['GR_Change'] = merged['Gamma_Ratio'] - merged['Gamma_Ratio_prev']
+                    merged['VR_Change'] = merged['Volume_Ratio'] - merged['Volume_Ratio_prev']
+                    merged['Price_Change%'] = ((merged['Price'] - merged['Price_prev']) / merged['Price_prev'] * 100).round(2)
+                    merged['DPI_Change'] = merged['DPI%'] - merged['DPI%_prev']
+                    
+                    today_df = merged
+                    has_prev_data = True
+                else:
+                    today_df['DR_Change'] = None
+                    today_df['GR_Change'] = None
+                    today_df['VR_Change'] = None
+                    today_df['Price_Change%'] = None
+                    today_df['DPI_Change'] = None
+                    has_prev_data = False
+                
+                # ========== 生成信号（基于结构分析） ==========
+                st.subheader("🎯 交易信号榜单")
                 
                 signals = []
                 
-                for _, row in parsed_df.iterrows():
+                for _, row in today_df.iterrows():
                     symbol = row['Symbol']
                     sector = row['Sector']
                     price = row['Price']
-                    dpi = row.get('DPI%')
-                    dpi_5d = row.get('5d_DPI%')
-                    delta_ratio = row.get('Delta_Ratio')
-                    gamma_ratio = row.get('Gamma_Ratio')
-                    volume_ratio = row.get('Volume_Ratio')
+                    dr = row.get('Delta_Ratio')
+                    gr = row.get('Gamma_Ratio')
+                    vr = row.get('Volume_Ratio')
                     dist_cw = row.get('Dist_CW%')
                     dist_pw = row.get('Dist_PW%')
-                    next_exp_gamma = row.get('Next_Exp_Gamma')
-                    iv_rank = row.get('IV_Rank')
-                    options_impact = row.get('Options_Impact')
+                    dist_kg = row.get('Dist_KG%')
+                    neg = row.get('Next_Exp_Gamma')
+                    oi = row.get('Options_Impact')
+                    dpi = row.get('DPI%')
                     
-                    # 做多信号
-                    if dpi and dpi > 55:
-                        if dpi_5d and dpi_5d > 52:
-                            signals.append({
-                                'Symbol': symbol, 'Sector': sector, 'Type': '🚀 做多',
-                                'Signal': '机构持续买入',
-                                'Reason': f'DPI {dpi:.1f}%, 5日 {dpi_5d:.1f}%',
-                                'Style': 'Swing', 'OI%': options_impact
-                            })
-                        else:
-                            signals.append({
-                                'Symbol': symbol, 'Sector': sector, 'Type': '🚀 做多',
-                                'Signal': '机构当日买入',
-                                'Reason': f'DPI {dpi:.1f}%',
-                                'Style': 'Day/Swing', 'OI%': options_impact
-                            })
+                    # 变化量
+                    dr_chg = row.get('DR_Change')
+                    gr_chg = row.get('GR_Change')
+                    vr_chg = row.get('VR_Change')
+                    price_chg = row.get('Price_Change%')
                     
-                    if dist_pw is not None and 0 < dist_pw < 3 and dpi and dpi > 50:
-                        signals.append({
-                            'Symbol': symbol, 'Sector': sector, 'Type': '🚀 做多',
-                            'Signal': '支撑位抄底',
-                            'Reason': f'距PW {dist_pw:.1f}%, DPI {dpi:.1f}%',
-                            'Style': 'Day', 'OI%': options_impact
+                    # 跳过无效数据
+                    if dr is None or gr is None or vr is None:
+                        continue
+                    
+                    stock_signals = []
+                    
+                    # ========== 做多信号 ==========
+                    
+                    # 1. 结构偏多（当日）
+                    bullish_structure = (dr is not None and dr > -1.5) and (gr is not None and gr < 1.0) and (vr is not None and vr < 0.8)
+                    if bullish_structure:
+                        strength = 0
+                        reasons = []
+                        if dr > -1.0:
+                            strength += 2
+                            reasons.append(f"DR={dr:.2f}极偏多")
+                        elif dr > -1.5:
+                            strength += 1
+                            reasons.append(f"DR={dr:.2f}偏多")
+                        if gr < 0.7:
+                            strength += 2
+                            reasons.append(f"GR={gr:.2f}Call主导")
+                        elif gr < 1.0:
+                            strength += 1
+                            reasons.append(f"GR={gr:.2f}")
+                        if vr < 0.5:
+                            strength += 2
+                            reasons.append(f"VR={vr:.2f}Call活跃")
+                        elif vr < 0.8:
+                            strength += 1
+                            reasons.append(f"VR={vr:.2f}")
+                        
+                        stock_signals.append({
+                            'Type': '🚀 做多',
+                            'Signal': '结构偏多',
+                            'Strength': strength,
+                            'Reason': ' | '.join(reasons),
+                            'Style': 'Day/Swing'
                         })
                     
-                    if next_exp_gamma and next_exp_gamma > 25 and gamma_ratio and gamma_ratio < 0.8:
-                        if dist_cw is not None and 0 < dist_cw < 5:
-                            signals.append({
-                                'Symbol': symbol, 'Sector': sector, 'Type': '⚡ Squeeze',
-                                'Signal': 'Gamma Squeeze预警',
-                                'Reason': f'NEG {next_exp_gamma:.1f}%, GR {gamma_ratio:.2f}, 距CW {dist_cw:.1f}%',
-                                'Style': 'Day', 'OI%': options_impact
+                    # 2. 结构转多（需要变化数据）
+                    if has_prev_data and dr_chg is not None and gr_chg is not None:
+                        if dr_chg > 0.3 and gr_chg < -0.1:
+                            stock_signals.append({
+                                'Type': '🚀 做多',
+                                'Signal': '结构转多',
+                                'Strength': 5 if dr_chg > 0.5 else 3,
+                                'Reason': f"DR变化+{dr_chg:.2f} | GR变化{gr_chg:.2f}",
+                                'Style': 'Swing'
                             })
                     
-                    if delta_ratio and delta_ratio < -5 and dpi and dpi > 48:
-                        signals.append({
-                            'Symbol': symbol, 'Sector': sector, 'Type': '🚀 做多',
-                            'Signal': '超卖反弹',
-                            'Reason': f'DR {delta_ratio:.2f}, DPI {dpi:.1f}%',
-                            'Style': 'Swing', 'OI%': options_impact
+                    # 3. 突破蓄势（接近Call Wall + 结构支持）
+                    if dist_cw is not None and 0 < dist_cw < 5:
+                        if dr is not None and dr > -1.5 and gr is not None and gr < 1.2:
+                            stock_signals.append({
+                                'Type': '🚀 做多',
+                                'Signal': '突破蓄势',
+                                'Strength': 4 if dist_cw < 3 else 2,
+                                'Reason': f"距CW {dist_cw:.1f}% | DR={dr:.2f} | GR={gr:.2f}",
+                                'Style': 'Day'
+                            })
+                    
+                    # 4. 支撑确认（在Put Wall上方 + 结构支持）
+                    if dist_pw is not None and 0 < dist_pw < 5:
+                        if dr is not None and dr > -2.0 and vr is not None and vr < 1.2:
+                            stock_signals.append({
+                                'Type': '🚀 做多',
+                                'Signal': '支撑确认',
+                                'Strength': 4 if dist_pw < 2 else 2,
+                                'Reason': f"距PW {dist_pw:.1f}% | DR={dr:.2f} | VR={vr:.2f}",
+                                'Style': 'Day/Swing'
+                            })
+                    
+                    # 5. 超卖反弹（DR极负但开始回归）
+                    if dr is not None and dr < -4:
+                        if has_prev_data and dr_chg is not None and dr_chg > 0.2:
+                            stock_signals.append({
+                                'Type': '🚀 做多',
+                                'Signal': '超卖反弹',
+                                'Strength': 5,
+                                'Reason': f"DR={dr:.2f}极负 | 变化+{dr_chg:.2f}回归中",
+                                'Style': 'Swing'
+                            })
+                    
+                    # ========== 做空信号 ==========
+                    
+                    # 6. 结构偏空（当日）
+                    bearish_structure = (dr is not None and dr < -2.5) and (gr is not None and gr > 1.5) and (vr is not None and vr > 1.2)
+                    if bearish_structure:
+                        strength = 0
+                        reasons = []
+                        if dr < -4.0:
+                            strength += 2
+                            reasons.append(f"DR={dr:.2f}极偏空")
+                        elif dr < -2.5:
+                            strength += 1
+                            reasons.append(f"DR={dr:.2f}偏空")
+                        if gr > 2.0:
+                            strength += 2
+                            reasons.append(f"GR={gr:.2f}Put主导")
+                        elif gr > 1.5:
+                            strength += 1
+                            reasons.append(f"GR={gr:.2f}")
+                        if vr > 2.0:
+                            strength += 2
+                            reasons.append(f"VR={vr:.2f}Put活跃")
+                        elif vr > 1.2:
+                            strength += 1
+                            reasons.append(f"VR={vr:.2f}")
+                        
+                        stock_signals.append({
+                            'Type': '💀 做空',
+                            'Signal': '结构偏空',
+                            'Strength': strength,
+                            'Reason': ' | '.join(reasons),
+                            'Style': 'Day/Swing'
                         })
                     
-                    # 做空信号
-                    if dpi and dpi < 45:
-                        if dpi_5d and dpi_5d < 48:
-                            signals.append({
-                                'Symbol': symbol, 'Sector': sector, 'Type': '💀 做空',
-                                'Signal': '机构持续卖出',
-                                'Reason': f'DPI {dpi:.1f}%, 5日 {dpi_5d:.1f}%',
-                                'Style': 'Swing', 'OI%': options_impact
+                    # 7. 结构转空（需要变化数据）
+                    if has_prev_data and dr_chg is not None and gr_chg is not None:
+                        if dr_chg < -0.3 and gr_chg > 0.1:
+                            stock_signals.append({
+                                'Type': '💀 做空',
+                                'Signal': '结构转空',
+                                'Strength': 5 if dr_chg < -0.5 else 3,
+                                'Reason': f"DR变化{dr_chg:.2f} | GR变化+{gr_chg:.2f}",
+                                'Style': 'Swing'
                             })
                     
-                    if dist_cw is not None and 0 < dist_cw < 3 and dpi and dpi < 50:
-                        if volume_ratio and volume_ratio > 1.2:
-                            signals.append({
-                                'Symbol': symbol, 'Sector': sector, 'Type': '💀 做空',
-                                'Signal': '阻力位压制',
-                                'Reason': f'距CW {dist_cw:.1f}%, DPI {dpi:.1f}%, VR {volume_ratio:.2f}',
-                                'Style': 'Day', 'OI%': options_impact
+                    # 8. 阻力确认（接近Call Wall + 结构不支持）
+                    if dist_cw is not None and 0 < dist_cw < 5:
+                        if dr is not None and dr < -2.0 and gr is not None and gr > 1.2:
+                            stock_signals.append({
+                                'Type': '💀 做空',
+                                'Signal': '阻力确认',
+                                'Strength': 4 if dist_cw < 2 else 2,
+                                'Reason': f"距CW {dist_cw:.1f}% | DR={dr:.2f} | GR={gr:.2f}",
+                                'Style': 'Day'
                             })
                     
-                    # 特殊信号
-                    if iv_rank and iv_rank > 80:
-                        signals.append({
-                            'Symbol': symbol, 'Sector': sector, 'Type': '📈 IV高',
-                            'Signal': 'IV高位',
-                            'Reason': f'IV Rank {iv_rank:.1f}%',
-                            'Style': '卖方策略', 'OI%': options_impact
-                        })
-                    
-                    if next_exp_gamma and next_exp_gamma > 30:
-                        implied_move = row.get('Implied_Move')
-                        if implied_move and implied_move > 3:
-                            signals.append({
-                                'Symbol': symbol, 'Sector': sector, 'Type': '🌊 波动',
-                                'Signal': '大波动预警',
-                                'Reason': f'NEG {next_exp_gamma:.1f}%, IM ${implied_move:.2f}',
-                                'Style': '跨式策略', 'OI%': options_impact
+                    # 9. 破位预警（接近Put Wall + 结构偏空）
+                    if dist_pw is not None and 0 < dist_pw < 3:
+                        if dr is not None and dr < -2.5 and gr is not None and gr > 1.5:
+                            stock_signals.append({
+                                'Type': '💀 做空',
+                                'Signal': '破位预警',
+                                'Strength': 5,
+                                'Reason': f"距PW {dist_pw:.1f}% | DR={dr:.2f} | GR={gr:.2f}",
+                                'Style': 'Day'
                             })
+                    
+                    # ========== 特殊信号 ==========
+                    
+                    # 10. Gamma Squeeze预警
+                    if dr is not None and dr < -3.5:
+                        if dist_cw is not None and dist_cw < 8:
+                            if has_prev_data and dr_chg is not None and dr_chg > 0.2:
+                                stock_signals.append({
+                                    'Type': '⚡ Squeeze',
+                                    'Signal': 'Squeeze预警',
+                                    'Strength': 6,
+                                    'Reason': f"DR={dr:.2f}极负 | 回归+{dr_chg:.2f} | 距CW {dist_cw:.1f}%",
+                                    'Style': 'Day'
+                                })
+                    
+                    # 11. Pin Risk（价格在Key Gamma附近）
+                    if dist_kg is not None and abs(dist_kg) < 2:
+                        if neg is not None and neg > 20:
+                            stock_signals.append({
+                                'Type': '📍 Pin',
+                                'Signal': 'Pin Risk',
+                                'Strength': 3,
+                                'Reason': f"距KG {dist_kg:.1f}% | NEG={neg:.1f}%",
+                                'Style': '周五OPEX'
+                            })
+                    
+                    # 添加到总信号
+                    for sig in stock_signals:
+                        sig['Symbol'] = symbol
+                        sig['Sector'] = sector
+                        sig['Price'] = price
+                        sig['DR'] = dr
+                        sig['GR'] = gr
+                        sig['VR'] = vr
+                        sig['OI%'] = oi
+                        sig['DPI%'] = dpi
+                        signals.append(sig)
                 
-                signals_df = pd.DataFrame(signals)
-                
-                # 显示信号统计
-                if not signals_df.empty:
+                # 转换为DataFrame并按强度排序
+                if signals:
+                    signals_df = pd.DataFrame(signals)
+                    signals_df = signals_df.sort_values('Strength', ascending=False)
+                    
+                    # 统计
                     col_stats = st.columns(5)
                     with col_stats[0]:
                         bullish = len(signals_df[signals_df['Type'] == '🚀 做多'])
@@ -7202,32 +7411,43 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                         squeeze = len(signals_df[signals_df['Type'] == '⚡ Squeeze'])
                         st.metric("⚡ Squeeze", squeeze)
                     with col_stats[3]:
-                        iv_high = len(signals_df[signals_df['Type'] == '📈 IV高'])
-                        st.metric("📈 IV高", iv_high)
+                        pin = len(signals_df[signals_df['Type'] == '📍 Pin'])
+                        st.metric("📍 Pin", pin)
                     with col_stats[4]:
-                        volatile = len(signals_df[signals_df['Type'] == '🌊 波动'])
-                        st.metric("🌊 波动", volatile)
+                        st.metric("📊 总信号", len(signals_df))
                     
-                    # 信号筛选
-                    signal_filter = st.selectbox(
-                        "筛选信号类型",
-                        ["全部", "🚀 做多", "💀 做空", "⚡ Squeeze", "📈 IV高", "🌊 波动"],
-                        key="tracker_signal_filter"
-                    )
+                    # 筛选
+                    filter_col1, filter_col2 = st.columns(2)
+                    with filter_col1:
+                        signal_filter = st.selectbox(
+                            "信号类型",
+                            ["全部", "🚀 做多", "💀 做空", "⚡ Squeeze", "📍 Pin"],
+                            key="tracker_signal_filter"
+                        )
+                    with filter_col2:
+                        strength_filter = st.slider("最低强度", 0, 6, 2, key="tracker_strength_filter")
                     
+                    # 应用筛选
+                    display_signals = signals_df[signals_df['Strength'] >= strength_filter]
                     if signal_filter != "全部":
-                        display_signals = signals_df[signals_df['Type'] == signal_filter]
-                    else:
-                        display_signals = signals_df
+                        display_signals = display_signals[display_signals['Type'] == signal_filter]
                     
-                    # 显示信号表格
-                    st.dataframe(
-                        display_signals[['Symbol', 'Sector', 'Type', 'Signal', 'Reason', 'Style', 'OI%']],
-                        hide_index=True,
-                        use_container_width=True
-                    )
+                    # 显示榜单
+                    st.markdown(f"### 📋 信号榜单 ({len(display_signals)} 条)")
+                    
+                    display_cols = ['Symbol', 'Sector', 'Type', 'Signal', 'Strength', 'Reason', 'Style', 'DR', 'GR', 'VR', 'DPI%']
+                    
+                    # 格式化显示
+                    display_df = display_signals[display_cols].copy()
+                    display_df['DR'] = display_df['DR'].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "N/A")
+                    display_df['GR'] = display_df['GR'].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "N/A")
+                    display_df['VR'] = display_df['VR'].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "N/A")
+                    display_df['DPI%'] = display_df['DPI%'].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A")
+                    
+                    st.dataframe(display_df, hide_index=True, use_container_width=True)
+                    
                 else:
-                    st.info("今日无信号")
+                    st.info("今日无符合条件的信号")
                 
                 st.divider()
                 
@@ -7235,72 +7455,63 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                 st.subheader("📋 100只股票完整数据")
                 
                 # 板块筛选
-                sector_filter = st.selectbox(
-                    "筛选板块",
-                    ["全部"] + list(WATCHLIST_100.keys()),
-                    key="tracker_sector_filter"
-                )
+                sector_options = ["全部"] + list(WATCHLIST_100.keys())
+                sector_filter = st.selectbox("筛选板块", sector_options, key="tracker_sector_filter")
                 
+                display_full = today_df.copy()
                 if sector_filter != "全部":
-                    display_df = parsed_df[parsed_df['Sector'] == sector_filter]
-                else:
-                    display_df = parsed_df
+                    display_full = display_full[display_full['Sector'] == sector_filter]
                 
-                # 排序选项
-                sort_col = st.selectbox(
-                    "排序字段",
-                    ['DPI%', 'Delta_Ratio', 'Gamma_Ratio', 'Volume_Ratio', 'Dist_CW%', 'Dist_PW%', 'IV_Rank'],
-                    key="tracker_sort"
-                )
+                # 排序
+                sort_options = ['Delta_Ratio', 'Gamma_Ratio', 'Volume_Ratio', 'Dist_CW%', 'Dist_PW%', 'DPI%']
+                if has_prev_data:
+                    sort_options = ['DR_Change', 'GR_Change', 'VR_Change'] + sort_options
+                
+                sort_col = st.selectbox("排序字段", sort_options, key="tracker_sort")
                 sort_asc = st.checkbox("升序", value=False, key="tracker_sort_asc")
                 
-                display_df_sorted = display_df.dropna(subset=[sort_col]).sort_values(sort_col, ascending=sort_asc)
+                display_full_sorted = display_full.dropna(subset=[sort_col]).sort_values(sort_col, ascending=sort_asc)
                 
-                # 格式化显示
-                display_cols = ['Symbol', 'Sector', 'Price', 'DPI%', '5d_DPI%', 'Delta_Ratio', 
-                               'Gamma_Ratio', 'Volume_Ratio', 'Dist_CW%', 'Dist_PW%', 'Options_Impact']
+                # 选择显示列
+                show_cols = ['Symbol', 'Sector', 'Price', 'Delta_Ratio', 'Gamma_Ratio', 'Volume_Ratio', 
+                            'Dist_CW%', 'Dist_PW%', 'DPI%', 'Options_Impact']
+                if has_prev_data:
+                    show_cols = ['Symbol', 'Sector', 'Price', 'Price_Change%', 
+                                'Delta_Ratio', 'DR_Change', 'Gamma_Ratio', 'GR_Change', 
+                                'Volume_Ratio', 'VR_Change', 'Dist_CW%', 'Dist_PW%', 'DPI%']
                 
-                st.dataframe(
-                    display_df_sorted[display_cols].head(50),
-                    hide_index=True,
-                    use_container_width=True
-                )
+                st.dataframe(display_full_sorted[show_cols].head(50), hide_index=True, use_container_width=True)
                 
                 st.divider()
                 
                 # ========== 保存到Google Sheets ==========
-                st.subheader("☁️ 保存到Google Sheets")
+                st.subheader("☁️ 数据存储")
                 
                 TRACKER_WS = "tracker_100_daily"
                 
-                col_save1, col_save2 = st.columns(2)
+                col_save1, col_save2, col_save3 = st.columns(3)
                 
                 with col_save1:
                     if st.button("💾 保存今日数据", key="save_tracker_data", use_container_width=True):
-                        # 准备保存数据
                         save_data = {}
-                        for _, row in parsed_df.iterrows():
+                        for _, row in today_df.iterrows():
                             symbol = row['Symbol']
-                            row_dict = row.to_dict()
-                            row_dict['Date'] = date_str
-                            save_data[f"{date_str}_{symbol}"] = row_dict
+                            row_dict = {k: (None if pd.isna(v) else v) for k, v in row.to_dict().items()}
+                            save_data[f"{latest_date}_{symbol}"] = row_dict
                         
-                        # 加载现有数据并合并
                         existing = load_worksheet_data(TRACKER_WS) or {}
                         existing.update(save_data)
                         
                         if save_worksheet_data(TRACKER_WS, existing):
-                            st.success(f"✅ 已保存 {len(parsed_df)} 条记录到 Google Sheets")
+                            st.success(f"✅ 已保存 {len(today_df)} 条记录")
                         else:
                             st.error("❌ 保存失败")
                 
                 with col_save2:
-                    if st.button("📥 加载历史数据", key="load_tracker_history", use_container_width=True):
+                    if st.button("📥 加载历史", key="load_tracker_history", use_container_width=True):
                         history = load_worksheet_data(TRACKER_WS)
                         if history:
                             st.success(f"✅ 已加载 {len(history)} 条历史记录")
-                            
-                            # 转换为DataFrame显示
                             history_df = pd.DataFrame(list(history.values()))
                             if not history_df.empty and 'Date' in history_df.columns:
                                 dates = sorted(history_df['Date'].unique(), reverse=True)
@@ -7308,12 +7519,19 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                         else:
                             st.warning("无历史数据")
                 
+                with col_save3:
+                    if st.button("🗑️ 清空历史", key="clear_tracker_history", use_container_width=True):
+                        if save_worksheet_data(TRACKER_WS, {}):
+                            st.success("✅ 已清空历史数据")
+                        else:
+                            st.error("❌ 清空失败")
+                
             except Exception as e:
                 st.error(f"❌ 处理失败: {e}")
                 import traceback
                 st.code(traceback.format_exc())
         else:
-            st.info("👆 请上传每日期权数据CSV文件")
+            st.info("👆 请上传每日期权数据CSV文件（支持多天数据对比）")
 
 
 if __name__ == "__main__":
