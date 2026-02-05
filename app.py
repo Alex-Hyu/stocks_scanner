@@ -2899,7 +2899,7 @@ def main():
     st.title("🎯 股票波段期权筛选系统")
     st.caption(f"更新时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
         "📈 QQQ/NQ分析", 
         "📊 Equity Hub", 
         "📅 周五到期Gamma",
@@ -2907,7 +2907,8 @@ def main():
         "📊 板块资金流", 
         "🔍 个股筛选", 
         "🎯 综合名单",
-        "📡 100股追踪"
+        "📡 100股追踪",
+        "🌅 盘前扫描"
     ])
     
     # ========== Tab 1: QQQ/NQ盘前分析 ==========
@@ -7989,6 +7990,550 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                 st.code(traceback.format_exc())
         else:
             st.info("👆 请上传每日期权数据CSV文件（支持多天数据对比）")
+
+    # ========== Tab 9: 盘前扫描 ==========
+    with tab9:
+        st.header("🌅 盘前扫描 (Pre-Market Scanner)")
+        st.caption("扫描盘前价格变化，分析板块资金流向，与期权信号交叉验证 | 建议刷新时间: 9:15 AM EST")
+        
+        # 板块ETF清单
+        SECTOR_ETFS = {
+            'XLK': '科技',
+            'XLF': '金融',
+            'XLE': '能源',
+            'XLV': '医疗',
+            'XLY': '可选消费',
+            'XLP': '必需消费',
+            'XLI': '工业',
+            'XLB': '材料',
+            'XLU': '公用事业',
+            'XLRE': '房地产',
+            'XLC': '通信',
+            'SMH': '半导体',
+            'SOXX': '半导体2',
+            'GDX': '黄金矿业',
+            'GLD': '黄金',
+            'SLV': '白银',
+            'TLT': '长期国债',
+            'HYG': '高收益债',
+            'UNG': '天然气',
+            'USO': '原油',
+        }
+        
+        # 100只追踪股票（复用Tab8的清单）
+        WATCHLIST_100_PM = {
+            'MAG7': ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META', 'NVDA', 'TSLA'],
+            'AI_SEMI': ['AMD', 'INTC', 'MU', 'AVGO', 'TSM', 'MRVL', 'LRCX', 'SMCI', 'ARM', 
+                        'PLTR', 'AI', 'APP', 'IONQ', 'RGTI', 'SOUN'],
+            'CRYPTO': ['IBIT', 'MSTR', 'MARA', 'COIN', 'RIOT', 'CLSK', 'WULF', 'IREN', 'CORZ', 'GLXY'],
+            'MEME_GROWTH': ['GME', 'AMC', 'SOFI', 'HOOD', 'RIVN', 'NIO', 'RKLB', 'JOBY', 'LUNR', 
+                           'ACHR', 'CVNA', 'DKNG', 'HIMS', 'ASTS', 'OKLO'],
+            'SOFTWARE': ['CRM', 'NOW', 'ORCL', 'SHOP', 'SNOW', 'NET', 'DDOG', 'CRWD', 'ZS', 'MDB'],
+            'CONSUMER': ['NFLX', 'DIS', 'UBER', 'SNAP', 'SPOT', 'ABNB', 'BA', 'LUV'],
+            'FINANCE': ['JPM', 'BAC', 'C', 'PYPL', 'SQ'],
+            'ENERGY': ['XOM', 'CVX', 'OXY', 'FCX', 'AA', 'MP', 'SMR', 'BE'],
+            'GOLD_SILVER': ['GLD', 'SLV', 'GDX', 'AG', 'NEM', 'KGC', 'AEM', 'GOLD'],
+            'CHINA': ['BABA', 'JD', 'PDD', 'XPEV', 'LI', 'BILI', 'TAL', 'KWEB'],
+            'ETF_INDEX': ['SPY', 'QQQ', 'IWM', 'SOXL', 'VIX'],
+        }
+        
+        def get_all_premarket_symbols():
+            """获取所有需要扫描的标的"""
+            symbols = list(SECTOR_ETFS.keys())
+            for sector, stocks in WATCHLIST_100_PM.items():
+                for s in stocks:
+                    if s not in symbols:
+                        symbols.append(s)
+            return symbols
+        
+        def get_stock_sector_pm(symbol):
+            """获取股票所属板块"""
+            if symbol in SECTOR_ETFS:
+                return f"ETF-{SECTOR_ETFS[symbol]}"
+            for sector, stocks in WATCHLIST_100_PM.items():
+                if symbol in stocks:
+                    return sector
+            return 'OTHER'
+        
+        @st.cache_data(ttl=60)  # 1分钟缓存
+        def scan_premarket_batch(symbols):
+            """批量扫描盘前价格"""
+            results = []
+            
+            for symbol in symbols:
+                try:
+                    ticker = yf.Ticker(symbol)
+                    info = ticker.info
+                    
+                    # 盘前价格
+                    pre_price = info.get('preMarketPrice')
+                    prev_close = info.get('previousClose') or info.get('regularMarketPreviousClose')
+                    current_price = info.get('regularMarketPrice') or prev_close
+                    
+                    # 计算盘前涨跌幅
+                    if pre_price and prev_close and prev_close > 0:
+                        pre_change_pct = (pre_price - prev_close) / prev_close * 100
+                    else:
+                        pre_change_pct = None
+                    
+                    # 盘前成交量
+                    pre_volume = info.get('preMarketVolume', 0) or 0
+                    avg_volume = info.get('averageVolume', 1) or 1
+                    avg_volume_10d = info.get('averageVolume10days', avg_volume) or avg_volume
+                    
+                    # 成交量比率（相对10日均量）
+                    vol_ratio = (pre_volume / avg_volume_10d * 100) if avg_volume_10d > 0 else 0
+                    
+                    results.append({
+                        'Symbol': symbol,
+                        'Sector': get_stock_sector_pm(symbol),
+                        'Prev_Close': prev_close,
+                        'Pre_Price': pre_price,
+                        'Pre_Change%': pre_change_pct,
+                        'Pre_Volume': pre_volume,
+                        'Avg_Volume': avg_volume_10d,
+                        'Vol_Ratio%': vol_ratio,
+                        'Current_Price': current_price,
+                    })
+                except Exception as e:
+                    results.append({
+                        'Symbol': symbol,
+                        'Sector': get_stock_sector_pm(symbol),
+                        'Prev_Close': None,
+                        'Pre_Price': None,
+                        'Pre_Change%': None,
+                        'Pre_Volume': None,
+                        'Avg_Volume': None,
+                        'Vol_Ratio%': None,
+                        'Current_Price': None,
+                        'Error': str(e)
+                    })
+            
+            return pd.DataFrame(results)
+        
+        # 显示当前时间
+        from datetime import datetime
+        import pytz
+        
+        try:
+            et_tz = pytz.timezone('US/Eastern')
+            current_time_et = datetime.now(et_tz).strftime('%Y-%m-%d %H:%M:%S ET')
+        except:
+            current_time_et = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        st.info(f"⏰ 当前时间: {current_time_et} | 💡 建议在 9:15 AM ET 刷新获取最新盘前数据")
+        
+        # 刷新按钮
+        col_btn1, col_btn2, col_btn3 = st.columns([2, 1, 1])
+        
+        with col_btn1:
+            scan_button = st.button("🔄 扫描盘前价格", type="primary", use_container_width=True)
+        with col_btn2:
+            if st.button("🗑️ 清除缓存", use_container_width=True):
+                st.cache_data.clear()
+                st.success("缓存已清除")
+        with col_btn3:
+            st.metric("扫描标的", f"{len(get_all_premarket_symbols())} 只")
+        
+        # 上传期权信号数据（用于交叉验证）
+        st.markdown("---")
+        st.subheader("📤 上传当日期权数据（用于交叉验证）")
+        
+        options_file = st.file_uploader(
+            "上传今日SpotGamma CSV（可选，用于与盘前数据交叉验证）",
+            type=['csv'],
+            key='premarket_options_upload'
+        )
+        
+        options_signals = {}
+        if options_file:
+            try:
+                options_df = pd.read_csv(options_file)
+                st.success(f"✅ 已加载期权数据: {len(options_df)} 条")
+                
+                # 解析期权信号
+                for _, row in options_df.iterrows():
+                    symbol = row.get('Symbol', '')
+                    if not symbol:
+                        continue
+                    
+                    dr = parse_number_safe(row.get('Delta Ratio'))
+                    gr = parse_number_safe(row.get('Gamma Ratio'))
+                    vr = parse_number_safe(row.get('Volume Ratio'))
+                    
+                    # 简单的多空判断
+                    if dr is not None and gr is not None and vr is not None:
+                        bullish_score = 0
+                        bearish_score = 0
+                        
+                        # Delta Ratio
+                        if dr > -1.0:
+                            bullish_score += 2
+                        elif dr > -1.5:
+                            bullish_score += 1
+                        elif dr < -3.0:
+                            bearish_score += 2
+                        elif dr < -2.5:
+                            bearish_score += 1
+                        
+                        # Gamma Ratio
+                        if gr < 0.8:
+                            bullish_score += 1
+                        elif gr > 1.5:
+                            bearish_score += 1
+                        
+                        # Volume Ratio
+                        if vr < 0.8:
+                            bullish_score += 1
+                        elif vr > 1.5:
+                            bearish_score += 1
+                        
+                        if bullish_score >= 3:
+                            signal = '🚀 偏多'
+                        elif bearish_score >= 3:
+                            signal = '💀 偏空'
+                        elif bullish_score > bearish_score:
+                            signal = '📈 略多'
+                        elif bearish_score > bullish_score:
+                            signal = '📉 略空'
+                        else:
+                            signal = '➖ 中性'
+                        
+                        options_signals[symbol] = {
+                            'Signal': signal,
+                            'DR': dr,
+                            'GR': gr,
+                            'VR': vr,
+                            'Bullish_Score': bullish_score,
+                            'Bearish_Score': bearish_score
+                        }
+                
+                st.info(f"📊 已解析 {len(options_signals)} 只股票的期权信号")
+                
+            except Exception as e:
+                st.error(f"期权数据解析失败: {e}")
+        
+        # 执行扫描
+        if scan_button:
+            with st.spinner("正在扫描盘前价格..."):
+                all_symbols = get_all_premarket_symbols()
+                premarket_df = scan_premarket_batch(all_symbols)
+                
+                # 保存到session state
+                st.session_state['premarket_data'] = premarket_df
+                st.session_state['premarket_time'] = current_time_et
+        
+        # 显示结果
+        if 'premarket_data' in st.session_state:
+            premarket_df = st.session_state['premarket_data']
+            scan_time = st.session_state.get('premarket_time', '')
+            
+            st.success(f"✅ 扫描完成 | 时间: {scan_time} | 共 {len(premarket_df)} 只标的")
+            
+            # 过滤有效数据
+            valid_df = premarket_df[premarket_df['Pre_Change%'].notna()].copy()
+            
+            if valid_df.empty:
+                st.warning("⚠️ 未获取到有效的盘前数据，可能盘前交易尚未开始或Yahoo数据延迟")
+            else:
+                st.info(f"📊 获取到 {len(valid_df)} 只标的的盘前数据")
+                
+                # ========== 板块资金流向 ==========
+                st.subheader("📊 板块资金流向")
+                
+                sector_df = valid_df[valid_df['Symbol'].isin(SECTOR_ETFS.keys())].copy()
+                sector_df['板块'] = sector_df['Symbol'].map(SECTOR_ETFS)
+                sector_df = sector_df.sort_values('Pre_Change%', ascending=False)
+                
+                # 资金流向判断
+                def get_flow_signal(row):
+                    change = row.get('Pre_Change%', 0) or 0
+                    vol = row.get('Vol_Ratio%', 0) or 0
+                    
+                    if change > 1.5 and vol > 100:
+                        return '🔥 强势流入'
+                    elif change > 0.5:
+                        return '📈 资金流入'
+                    elif change < -1.5 and vol > 100:
+                        return '💨 强势流出'
+                    elif change < -0.5:
+                        return '📉 资金流出'
+                    else:
+                        return '➖ 中性'
+                
+                sector_df['资金信号'] = sector_df.apply(get_flow_signal, axis=1)
+                
+                # 显示板块表格
+                sector_display = sector_df[['Symbol', '板块', 'Pre_Change%', 'Vol_Ratio%', '资金信号']].copy()
+                sector_display.columns = ['ETF', '板块', '盘前涨跌%', '成交量比%', '资金信号']
+                
+                # 格式化
+                sector_display['盘前涨跌%'] = sector_display['盘前涨跌%'].apply(
+                    lambda x: f"+{x:.2f}%" if x and x > 0 else f"{x:.2f}%" if x else "N/A"
+                )
+                sector_display['成交量比%'] = sector_display['成交量比%'].apply(
+                    lambda x: f"{x:.1f}%" if x else "N/A"
+                )
+                
+                st.dataframe(sector_display, hide_index=True, use_container_width=True)
+                
+                # 板块热力图
+                st.markdown("**板块涨跌热力图：**")
+                
+                # 分成涨跌两组
+                rising_sectors = sector_df[sector_df['Pre_Change%'] > 0].head(5)
+                falling_sectors = sector_df[sector_df['Pre_Change%'] < 0].tail(5)
+                
+                col_rise, col_fall = st.columns(2)
+                with col_rise:
+                    st.markdown("🟢 **领涨板块**")
+                    for _, row in rising_sectors.iterrows():
+                        change = row['Pre_Change%']
+                        st.markdown(f"• **{row['板块']}** ({row['Symbol']}): +{change:.2f}%")
+                
+                with col_fall:
+                    st.markdown("🔴 **领跌板块**")
+                    for _, row in falling_sectors.iterrows():
+                        change = row['Pre_Change%']
+                        st.markdown(f"• **{row['板块']}** ({row['Symbol']}): {change:.2f}%")
+                
+                st.markdown("---")
+                
+                # ========== 个股异动 ==========
+                st.subheader("🔥 盘前异动个股")
+                
+                # 过滤非ETF的个股
+                stocks_df = valid_df[~valid_df['Symbol'].isin(SECTOR_ETFS.keys())].copy()
+                
+                # 异动筛选条件
+                col_filter1, col_filter2 = st.columns(2)
+                with col_filter1:
+                    min_change = st.slider("最小涨跌幅%", 0.0, 10.0, 2.0, key="pm_min_change")
+                with col_filter2:
+                    min_vol = st.slider("最小成交量比%", 0.0, 500.0, 50.0, key="pm_min_vol")
+                
+                # 涨幅TOP
+                rising_stocks = stocks_df[stocks_df['Pre_Change%'] >= min_change].sort_values('Pre_Change%', ascending=False)
+                # 跌幅TOP
+                falling_stocks = stocks_df[stocks_df['Pre_Change%'] <= -min_change].sort_values('Pre_Change%', ascending=True)
+                # 成交量异动
+                volume_stocks = stocks_df[stocks_df['Vol_Ratio%'] >= min_vol].sort_values('Vol_Ratio%', ascending=False)
+                
+                tab_rise, tab_fall, tab_vol = st.tabs([
+                    f"📈 涨幅榜 ({len(rising_stocks)})",
+                    f"📉 跌幅榜 ({len(falling_stocks)})",
+                    f"📊 成交量异动 ({len(volume_stocks)})"
+                ])
+                
+                def format_stock_table(df):
+                    """格式化股票表格"""
+                    display = df[['Symbol', 'Sector', 'Prev_Close', 'Pre_Price', 'Pre_Change%', 'Vol_Ratio%']].copy()
+                    display.columns = ['股票', '板块', '昨收', '盘前价', '涨跌%', '成交量比%']
+                    
+                    # 添加期权信号列
+                    if options_signals:
+                        display['期权信号'] = display['股票'].apply(
+                            lambda x: options_signals.get(x, {}).get('Signal', '➖')
+                        )
+                    
+                    display['昨收'] = display['昨收'].apply(lambda x: f"${x:.2f}" if x else "N/A")
+                    display['盘前价'] = display['盘前价'].apply(lambda x: f"${x:.2f}" if x else "N/A")
+                    display['涨跌%'] = display['涨跌%'].apply(
+                        lambda x: f"+{x:.2f}%" if x and x > 0 else f"{x:.2f}%" if x else "N/A"
+                    )
+                    display['成交量比%'] = display['成交量比%'].apply(lambda x: f"{x:.1f}%" if x else "N/A")
+                    
+                    return display
+                
+                with tab_rise:
+                    if not rising_stocks.empty:
+                        st.dataframe(format_stock_table(rising_stocks.head(20)), hide_index=True, use_container_width=True)
+                    else:
+                        st.info("无符合条件的涨幅股票")
+                
+                with tab_fall:
+                    if not falling_stocks.empty:
+                        st.dataframe(format_stock_table(falling_stocks.head(20)), hide_index=True, use_container_width=True)
+                    else:
+                        st.info("无符合条件的跌幅股票")
+                
+                with tab_vol:
+                    if not volume_stocks.empty:
+                        st.dataframe(format_stock_table(volume_stocks.head(20)), hide_index=True, use_container_width=True)
+                    else:
+                        st.info("无符合条件的成交量异动股票")
+                
+                st.markdown("---")
+                
+                # ========== 交叉验证信号 ==========
+                if options_signals:
+                    st.subheader("🎯 交叉验证信号（盘前 + 期权）")
+                    
+                    cross_signals = []
+                    
+                    for _, row in valid_df.iterrows():
+                        symbol = row['Symbol']
+                        pre_change = row.get('Pre_Change%')
+                        vol_ratio = row.get('Vol_Ratio%', 0) or 0
+                        
+                        if symbol not in options_signals or pre_change is None:
+                            continue
+                        
+                        opt_sig = options_signals[symbol]
+                        opt_signal = opt_sig['Signal']
+                        
+                        # 交叉验证逻辑
+                        cross_result = None
+                        cross_action = None
+                        confidence = 0
+                        
+                        if pre_change > 1.5:  # 盘前涨
+                            if '偏多' in opt_signal or '略多' in opt_signal:
+                                cross_result = '✅ 强做多'
+                                cross_action = '盘前涨 + 期权偏多 = 顺势做多'
+                                confidence = 5 if '偏多' in opt_signal else 3
+                            elif '偏空' in opt_signal or '略空' in opt_signal:
+                                cross_result = '⚠️ 谨慎追涨'
+                                cross_action = '盘前涨 但 期权偏空 = 可能是陷阱'
+                                confidence = 2
+                        
+                        elif pre_change < -1.5:  # 盘前跌
+                            if '偏多' in opt_signal or '略多' in opt_signal:
+                                cross_result = '🎯 抄底机会'
+                                cross_action = '盘前跌 但 期权偏多 = 潜在抄底'
+                                confidence = 4
+                            elif '偏空' in opt_signal or '略空' in opt_signal:
+                                cross_result = '✅ 强做空'
+                                cross_action = '盘前跌 + 期权偏空 = 顺势做空'
+                                confidence = 5 if '偏空' in opt_signal else 3
+                        
+                        elif abs(pre_change) <= 1.5:  # 盘前平盘
+                            if '偏多' in opt_signal:
+                                cross_result = '📈 关注做多'
+                                cross_action = '盘前平 + 期权偏多 = 等待突破'
+                                confidence = 3
+                            elif '偏空' in opt_signal:
+                                cross_result = '📉 关注做空'
+                                cross_action = '盘前平 + 期权偏空 = 等待破位'
+                                confidence = 3
+                        
+                        if cross_result:
+                            cross_signals.append({
+                                'Symbol': symbol,
+                                'Sector': row['Sector'],
+                                '盘前涨跌%': pre_change,
+                                '成交量比%': vol_ratio,
+                                '期权信号': opt_signal,
+                                'DR': opt_sig.get('DR'),
+                                'GR': opt_sig.get('GR'),
+                                'VR': opt_sig.get('VR'),
+                                '交叉结果': cross_result,
+                                '交叉逻辑': cross_action,
+                                '置信度': confidence
+                            })
+                    
+                    if cross_signals:
+                        cross_df = pd.DataFrame(cross_signals)
+                        cross_df = cross_df.sort_values('置信度', ascending=False)
+                        
+                        # 统计
+                        strong_long = len(cross_df[cross_df['交叉结果'] == '✅ 强做多'])
+                        strong_short = len(cross_df[cross_df['交叉结果'] == '✅ 强做空'])
+                        dip_buy = len(cross_df[cross_df['交叉结果'] == '🎯 抄底机会'])
+                        caution = len(cross_df[cross_df['交叉结果'] == '⚠️ 谨慎追涨'])
+                        
+                        col_stat1, col_stat2, col_stat3, col_stat4 = st.columns(4)
+                        with col_stat1:
+                            st.metric("✅ 强做多", strong_long)
+                        with col_stat2:
+                            st.metric("✅ 强做空", strong_short)
+                        with col_stat3:
+                            st.metric("🎯 抄底机会", dip_buy)
+                        with col_stat4:
+                            st.metric("⚠️ 谨慎追涨", caution)
+                        
+                        # 筛选
+                        cross_filter = st.selectbox(
+                            "筛选信号类型",
+                            ["全部", "✅ 强做多", "✅ 强做空", "🎯 抄底机会", "⚠️ 谨慎追涨"],
+                            key="cross_signal_filter"
+                        )
+                        
+                        display_cross = cross_df if cross_filter == "全部" else cross_df[cross_df['交叉结果'] == cross_filter]
+                        
+                        # 详细展示
+                        for _, row in display_cross.head(15).iterrows():
+                            symbol = row['Symbol']
+                            cross_result = row['交叉结果']
+                            
+                            # 确定边框颜色
+                            if '强做多' in cross_result:
+                                border_color = "#00cc66"
+                            elif '强做空' in cross_result:
+                                border_color = "#ff4b4b"
+                            elif '抄底' in cross_result:
+                                border_color = "#ffd700"
+                            else:
+                                border_color = "#ffa500"
+                            
+                            with st.container():
+                                st.markdown(f"""
+                                <div style="border-left: 4px solid {border_color}; padding-left: 15px; margin-bottom: 10px;">
+                                <h4>{cross_result} {symbol} ({row['Sector']})</h4>
+                                </div>
+                                """, unsafe_allow_html=True)
+                                
+                                info_cols = st.columns(6)
+                                with info_cols[0]:
+                                    pre_chg = row['盘前涨跌%']
+                                    chg_str = f"+{pre_chg:.2f}%" if pre_chg > 0 else f"{pre_chg:.2f}%"
+                                    st.metric("盘前涨跌", chg_str)
+                                with info_cols[1]:
+                                    st.metric("成交量比", f"{row['成交量比%']:.1f}%")
+                                with info_cols[2]:
+                                    st.metric("期权信号", row['期权信号'])
+                                with info_cols[3]:
+                                    dr = row.get('DR')
+                                    st.metric("Delta Ratio", f"{dr:.2f}" if dr else "N/A")
+                                with info_cols[4]:
+                                    gr = row.get('GR')
+                                    st.metric("Gamma Ratio", f"{gr:.2f}" if gr else "N/A")
+                                with info_cols[5]:
+                                    st.metric("置信度", f"{'⭐' * row['置信度']}")
+                                
+                                st.markdown(f"**交叉逻辑**: {row['交叉逻辑']}")
+                                st.markdown("---")
+                    else:
+                        st.info("无交叉验证信号（需要盘前涨跌幅 > 1.5% 的股票）")
+                else:
+                    st.info("💡 上传期权数据CSV可启用交叉验证功能")
+                
+                # ========== 完整数据表 ==========
+                st.subheader("📋 完整盘前数据")
+                
+                with st.expander("查看完整数据表"):
+                    full_display = valid_df.copy()
+                    full_display['Pre_Change%'] = full_display['Pre_Change%'].apply(
+                        lambda x: f"+{x:.2f}%" if x and x > 0 else f"{x:.2f}%" if x else "N/A"
+                    )
+                    full_display['Vol_Ratio%'] = full_display['Vol_Ratio%'].apply(
+                        lambda x: f"{x:.1f}%" if x else "N/A"
+                    )
+                    full_display['Pre_Price'] = full_display['Pre_Price'].apply(
+                        lambda x: f"${x:.2f}" if x else "N/A"
+                    )
+                    full_display['Prev_Close'] = full_display['Prev_Close'].apply(
+                        lambda x: f"${x:.2f}" if x else "N/A"
+                    )
+                    
+                    st.dataframe(
+                        full_display[['Symbol', 'Sector', 'Prev_Close', 'Pre_Price', 'Pre_Change%', 'Vol_Ratio%']],
+                        hide_index=True,
+                        use_container_width=True
+                    )
+        
+        else:
+            st.info("👆 点击 **扫描盘前价格** 按钮开始扫描")
 
 
 if __name__ == "__main__":
