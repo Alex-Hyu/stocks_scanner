@@ -7641,6 +7641,268 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                     
                     st.dataframe(display_df, hide_index=True, use_container_width=True)
                     
+                    # ========== 详细信号卡片 ==========
+                    st.markdown("### 📋 详细信号列表")
+                    
+                    # 筛选技术确认的信号用于详细展示
+                    detail_filter = st.selectbox(
+                        "选择展示类型",
+                        ["✅ 技术确认信号", "⚠️ 技术冲突信号", "全部信号"],
+                        key="tracker_detail_filter"
+                    )
+                    
+                    if detail_filter == "✅ 技术确认信号":
+                        detail_signals = display_signals[display_signals['Tech_Confirm'].str.contains('✅', na=False)]
+                    elif detail_filter == "⚠️ 技术冲突信号":
+                        detail_signals = display_signals[display_signals['Tech_Confirm'].str.contains('⚠️', na=False)]
+                    else:
+                        detail_signals = display_signals
+                    
+                    if not detail_signals.empty:
+                        st.caption(f"展示 {len(detail_signals)} 个信号的详细分析")
+                        
+                        for idx, row in detail_signals.head(20).iterrows():
+                            symbol = row['Symbol']
+                            sector = row['Sector']
+                            signal_type = row['Type']
+                            signal_name = row['Signal']
+                            final_strength = row.get('Final_Strength', row.get('Strength', 0))
+                            
+                            # 确定边框颜色
+                            if '做多' in signal_type:
+                                border_color = "#00cc66"
+                                icon = "🚀"
+                            elif '做空' in signal_type:
+                                border_color = "#ff4b4b"
+                                icon = "💀"
+                            elif 'Squeeze' in signal_type:
+                                border_color = "#ffd700"
+                                icon = "⚡"
+                            else:
+                                border_color = "#888888"
+                                icon = "📍"
+                            
+                            # 技术确认状态
+                            tech_confirm = row.get('Tech_Confirm', '➖')
+                            if '✅强确认' in str(tech_confirm):
+                                tech_badge = "🌟 技术强确认"
+                                tech_color = "#00cc66"
+                            elif '✅确认' in str(tech_confirm):
+                                tech_badge = "✅ 技术确认"
+                                tech_color = "#00cc66"
+                            elif '⚠️' in str(tech_confirm):
+                                tech_badge = "⚠️ 技术冲突"
+                                tech_color = "#ff4b4b"
+                            else:
+                                tech_badge = "➖ 待确认"
+                                tech_color = "#888888"
+                            
+                            with st.container():
+                                # 标题行
+                                st.markdown(f"""
+                                <div style="border-left: 4px solid {border_color}; padding-left: 15px; margin-bottom: 10px;">
+                                <h4>{icon} {symbol} ({sector}) - {signal_name} | 
+                                <span style="color: {tech_color};">{tech_badge}</span></h4>
+                                </div>
+                                """, unsafe_allow_html=True)
+                                
+                                # 核心评分信息
+                                score_cols = st.columns(6)
+                                with score_cols[0]:
+                                    strength_color = "🟢" if final_strength >= 6 else ("🟡" if final_strength >= 3 else "🔴")
+                                    st.metric("综合强度", f"{strength_color} {final_strength}")
+                                with score_cols[1]:
+                                    opt_strength = row.get('Strength', 0)
+                                    st.metric("期权强度", f"{opt_strength}")
+                                with score_cols[2]:
+                                    tech_bonus = row.get('Tech_Bonus', 0)
+                                    bonus_str = f"+{tech_bonus}" if tech_bonus > 0 else str(tech_bonus)
+                                    st.metric("技术加分", bonus_str)
+                                with score_cols[3]:
+                                    price = row.get('Price')
+                                    st.metric("当前价", f"${price:.2f}" if price else "N/A")
+                                with score_cols[4]:
+                                    st.metric("交易风格", row.get('Style', 'N/A'))
+                                with score_cols[5]:
+                                    dpi = row.get('DPI%')
+                                    st.metric("DPI", f"{dpi:.1f}%" if pd.notna(dpi) else "N/A")
+                                
+                                # 期权结构数据
+                                st.markdown("**📊 期权结构指标：**")
+                                opt_cols = st.columns(6)
+                                with opt_cols[0]:
+                                    dr = row.get('DR')
+                                    dr_val = f"{dr:.2f}" if pd.notna(dr) else "N/A"
+                                    dr_status = "偏多" if dr and dr > -1.5 else ("偏空" if dr and dr < -2.5 else "中性")
+                                    st.markdown(f"**Delta Ratio**: {dr_val} ({dr_status})")
+                                with opt_cols[1]:
+                                    gr = row.get('GR')
+                                    gr_val = f"{gr:.2f}" if pd.notna(gr) else "N/A"
+                                    gr_status = "Call主导" if gr and gr < 1.0 else ("Put主导" if gr and gr > 1.5 else "均衡")
+                                    st.markdown(f"**Gamma Ratio**: {gr_val} ({gr_status})")
+                                with opt_cols[2]:
+                                    vr = row.get('VR')
+                                    vr_val = f"{vr:.2f}" if pd.notna(vr) else "N/A"
+                                    vr_status = "Call活跃" if vr and vr < 0.8 else ("Put活跃" if vr and vr > 1.2 else "均衡")
+                                    st.markdown(f"**Volume Ratio**: {vr_val} ({vr_status})")
+                                with opt_cols[3]:
+                                    oi = row.get('OI%')
+                                    st.markdown(f"**Options Impact**: {oi:.1f}%" if pd.notna(oi) else "Options Impact: N/A")
+                                with opt_cols[4]:
+                                    # 从signals_df获取原始数据
+                                    orig_row = signals_df[signals_df['Symbol'] == symbol].iloc[0] if len(signals_df[signals_df['Symbol'] == symbol]) > 0 else {}
+                                    dist_cw = orig_row.get('Dist_CW%') if isinstance(orig_row, dict) else None
+                                    # 尝试从today_df获取
+                                    if dist_cw is None:
+                                        today_row = today_df[today_df['Symbol'] == symbol]
+                                        if not today_row.empty:
+                                            dist_cw = today_row.iloc[0].get('Dist_CW%')
+                                    st.markdown(f"**距Call Wall**: {dist_cw:.1f}%" if pd.notna(dist_cw) else "距Call Wall: N/A")
+                                with opt_cols[5]:
+                                    dist_pw = orig_row.get('Dist_PW%') if isinstance(orig_row, dict) else None
+                                    if dist_pw is None:
+                                        today_row = today_df[today_df['Symbol'] == symbol]
+                                        if not today_row.empty:
+                                            dist_pw = today_row.iloc[0].get('Dist_PW%')
+                                    st.markdown(f"**距Put Wall**: {dist_pw:.1f}%" if pd.notna(dist_pw) else "距Put Wall: N/A")
+                                
+                                # 技术面数据
+                                if enable_tech:
+                                    st.markdown("**📈 技术面指标 (WaveTrend + RSI)：**")
+                                    tech_cols = st.columns(5)
+                                    with tech_cols[0]:
+                                        wt1 = row.get('WT1')
+                                        wt_status = row.get('WT_Status', '')
+                                        wt_color = "🟢" if '超卖' in str(wt_status) else ("🔴" if '超买' in str(wt_status) else "⚪")
+                                        st.markdown(f"**WT1**: {wt_color} {wt1:.1f} ({wt_status})" if pd.notna(wt1) else "WT1: N/A")
+                                    with tech_cols[1]:
+                                        wt_dir = row.get('WT_Dir', '')
+                                        dir_text = "向上" if wt_dir == '↑' else ("向下" if wt_dir == '↓' else "横盘")
+                                        st.markdown(f"**WT方向**: {wt_dir} {dir_text}")
+                                    with tech_cols[2]:
+                                        rsi = row.get('RSI')
+                                        rsi_status = "超卖" if rsi and rsi < 30 else ("超买" if rsi and rsi > 70 else "中性")
+                                        rsi_color = "🟢" if rsi_status == "超卖" else ("🔴" if rsi_status == "超买" else "⚪")
+                                        st.markdown(f"**RSI**: {rsi_color} {rsi:.0f} ({rsi_status})" if pd.notna(rsi) else "RSI: N/A")
+                                    with tech_cols[3]:
+                                        tech_reason = row.get('Tech_Reason', '')
+                                        st.markdown(f"**技术详情**: {tech_reason}" if tech_reason else "技术详情: N/A")
+                                    with tech_cols[4]:
+                                        signal_dir = row.get('SignalDir', 'neutral')
+                                        dir_text = "做多方向" if signal_dir == 'bullish' else ("做空方向" if signal_dir == 'bearish' else "中性")
+                                        st.markdown(f"**信号方向**: {dir_text}")
+                                
+                                # 分析逻辑
+                                with st.expander("🔍 分析逻辑详情"):
+                                    st.markdown("**📋 期权信号原因：**")
+                                    reason = row.get('Reason', '')
+                                    for r in reason.split(' | '):
+                                        if r.strip():
+                                            st.markdown(f"• {r}")
+                                    
+                                    st.markdown("---")
+                                    
+                                    # 期权结构解读
+                                    st.markdown("**📊 期权结构解读：**")
+                                    dr = row.get('DR')
+                                    gr = row.get('GR')
+                                    vr = row.get('VR')
+                                    
+                                    if dr is not None:
+                                        if dr > -1.0:
+                                            st.markdown(f"• Delta Ratio = {dr:.2f}：**极度偏多**，Call头寸远超Put，市场看涨情绪强烈")
+                                        elif dr > -1.5:
+                                            st.markdown(f"• Delta Ratio = {dr:.2f}：**偏多**，Call头寸略多于Put")
+                                        elif dr > -2.5:
+                                            st.markdown(f"• Delta Ratio = {dr:.2f}：**中性**，Call/Put头寸相对均衡")
+                                        elif dr > -4.0:
+                                            st.markdown(f"• Delta Ratio = {dr:.2f}：**偏空**，Put头寸明显多于Call")
+                                        else:
+                                            st.markdown(f"• Delta Ratio = {dr:.2f}：**极度偏空**，Put头寸远超Call，可能超卖")
+                                    
+                                    if gr is not None:
+                                        if gr < 0.7:
+                                            st.markdown(f"• Gamma Ratio = {gr:.2f}：**Call Gamma主导**，上涨时加速，做市商需追涨")
+                                        elif gr < 1.0:
+                                            st.markdown(f"• Gamma Ratio = {gr:.2f}：**略偏Call Gamma**")
+                                        elif gr < 1.5:
+                                            st.markdown(f"• Gamma Ratio = {gr:.2f}：**Gamma均衡**")
+                                        elif gr < 2.0:
+                                            st.markdown(f"• Gamma Ratio = {gr:.2f}：**Put Gamma主导**，下跌时加速")
+                                        else:
+                                            st.markdown(f"• Gamma Ratio = {gr:.2f}：**Put Gamma强势主导**，下跌可能加速")
+                                    
+                                    if vr is not None:
+                                        if vr < 0.5:
+                                            st.markdown(f"• Volume Ratio = {vr:.2f}：**Call成交极活跃**，看涨情绪高涨")
+                                        elif vr < 0.8:
+                                            st.markdown(f"• Volume Ratio = {vr:.2f}：**Call成交活跃**")
+                                        elif vr < 1.2:
+                                            st.markdown(f"• Volume Ratio = {vr:.2f}：**成交均衡**")
+                                        elif vr < 2.0:
+                                            st.markdown(f"• Volume Ratio = {vr:.2f}：**Put成交活跃**，看跌情绪上升")
+                                        else:
+                                            st.markdown(f"• Volume Ratio = {vr:.2f}：**Put成交极活跃**，恐慌情绪")
+                                    
+                                    st.markdown("---")
+                                    
+                                    # 技术面解读
+                                    if enable_tech:
+                                        st.markdown("**📈 技术面解读：**")
+                                        wt1 = row.get('WT1')
+                                        rsi = row.get('RSI')
+                                        wt_status = row.get('WT_Status', '')
+                                        wt_dir = row.get('WT_Dir', '')
+                                        signal_dir = row.get('SignalDir', 'neutral')
+                                        
+                                        if wt1 is not None:
+                                            if wt1 <= -60:
+                                                st.markdown(f"• WaveTrend = {wt1:.1f}：**超卖区域**，短期可能反弹")
+                                            elif wt1 <= -53:
+                                                st.markdown(f"• WaveTrend = {wt1:.1f}：**接近超卖**")
+                                            elif wt1 >= 60:
+                                                st.markdown(f"• WaveTrend = {wt1:.1f}：**超买区域**，短期可能回调")
+                                            elif wt1 >= 53:
+                                                st.markdown(f"• WaveTrend = {wt1:.1f}：**接近超买**")
+                                            else:
+                                                st.markdown(f"• WaveTrend = {wt1:.1f}：**中性区域**")
+                                        
+                                        if rsi is not None:
+                                            if rsi < 30:
+                                                st.markdown(f"• RSI = {rsi:.0f}：**超卖**，支持反弹")
+                                            elif rsi > 70:
+                                                st.markdown(f"• RSI = {rsi:.0f}：**超买**，支持回调")
+                                            else:
+                                                st.markdown(f"• RSI = {rsi:.0f}：**中性**")
+                                        
+                                        # 交叉验证结论
+                                        st.markdown("---")
+                                        st.markdown("**🎯 交叉验证结论：**")
+                                        tech_confirm = row.get('Tech_Confirm', '')
+                                        
+                                        if signal_dir == 'bullish':
+                                            if '✅强确认' in str(tech_confirm):
+                                                st.success("期权结构看多 + 技术面超卖 = **强烈做多信号**，入场时机较佳")
+                                            elif '✅确认' in str(tech_confirm):
+                                                st.success("期权结构看多 + 技术面支持 = **做多信号确认**")
+                                            elif '⚠️' in str(tech_confirm):
+                                                st.warning("期权结构看多 但 技术面超买 = **谨慎追高**，建议等待回调")
+                                            else:
+                                                st.info("期权结构看多，技术面中性 = **待确认**，可小仓位试探")
+                                        elif signal_dir == 'bearish':
+                                            if '✅强确认' in str(tech_confirm):
+                                                st.success("期权结构看空 + 技术面超买 = **强烈做空信号**，入场时机较佳")
+                                            elif '✅确认' in str(tech_confirm):
+                                                st.success("期权结构看空 + 技术面支持 = **做空信号确认**")
+                                            elif '⚠️' in str(tech_confirm):
+                                                st.warning("期权结构看空 但 技术面超卖 = **谨慎做空**，可能有反弹")
+                                            else:
+                                                st.info("期权结构看空，技术面中性 = **待确认**，观望为主")
+                                
+                                st.markdown("---")
+                    else:
+                        st.info("无符合筛选条件的详细信号")
+                    
                 else:
                     st.info("今日无符合条件的信号")
                 
