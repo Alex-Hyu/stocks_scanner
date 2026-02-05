@@ -8112,7 +8112,6 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
             return pd.DataFrame(results)
         
         # 显示当前时间
-        from datetime import datetime
         import pytz
         
         try:
