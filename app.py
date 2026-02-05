@@ -7152,55 +7152,78 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                 st.markdown(f"**{sector}** ({len(stocks)}): {', '.join(stocks)}")
             st.info(f"总计: {len(get_watchlist_flat())} 只股票")
         
-        # 多文件上传
-        st.subheader("📤 上传数据")
-        st.caption("支持上传多天数据进行趋势对比（最新日期的文件放最后）")
+        # Google Sheets worksheet名称
+        TRACKER_WS = "tracker_100_daily"
         
-        tracker_files = st.file_uploader(
-            "上传每日期权数据CSV（可多选）",
+        # ========== 数据上传区 ==========
+        st.subheader("📤 上传今日数据")
+        st.caption("只需上传今日CSV，系统自动从历史数据库读取前几天数据进行对比")
+        
+        tracker_file = st.file_uploader(
+            "上传今日期权数据CSV",
             type=['csv', 'xlsx'],
-            key='tracker_upload_multi',
-            accept_multiple_files=True,
-            help="上传SpotGamma Equity Hub导出的CSV文件，支持多天数据对比"
+            key='tracker_upload_single',
+            help="上传SpotGamma Equity Hub导出的CSV文件"
         )
         
-        if tracker_files:
+        # 日期输入
+        data_date = st.date_input(
+            "数据日期",
+            value=datetime.now().date(),
+            key='tracker_data_date'
+        )
+        today_date_str = data_date.strftime('%Y-%m-%d')
+        
+        # 加载历史数据
+        @st.cache_data(ttl=300)
+        def load_history_from_sheets():
+            """从Google Sheets加载历史数据"""
+            history = load_worksheet_data(TRACKER_WS)
+            if not history:
+                return pd.DataFrame()
+            
+            records = list(history.values())
+            if not records:
+                return pd.DataFrame()
+            
+            df = pd.DataFrame(records)
+            return df
+        
+        def get_previous_day_data(history_df, current_date, days_back=1):
+            """获取前N天的数据"""
+            if history_df.empty or 'Date' not in history_df.columns:
+                return None
+            
+            # 获取所有日期并排序
+            all_dates = sorted(history_df['Date'].unique(), reverse=True)
+            
+            # 找到当前日期之前的日期
+            prev_dates = [d for d in all_dates if d < current_date]
+            
+            if len(prev_dates) >= days_back:
+                target_date = prev_dates[days_back - 1]
+                return history_df[history_df['Date'] == target_date].copy()
+            
+            return None
+        
+        # 显示历史数据状态
+        history_df = load_history_from_sheets()
+        
+        if not history_df.empty and 'Date' in history_df.columns:
+            history_dates = sorted(history_df['Date'].unique(), reverse=True)
+            st.success(f"📚 历史数据库: {len(history_dates)} 天数据 | 最近: {history_dates[:5]}")
+        else:
+            st.warning("📚 历史数据库为空，首次使用请先保存数据")
+        
+        if tracker_file:
             try:
-                # 读取所有上传的文件
-                all_data = {}
-                for f in tracker_files:
-                    # 从文件名提取日期
-                    fname = f.name
-                    # 尝试从文件名解析日期 (如 Top200_2026-02-03.csv)
-                    import re
-                    date_match = re.search(r'(\d{4}-\d{2}-\d{2})', fname)
-                    if date_match:
-                        file_date = date_match.group(1)
-                    else:
-                        file_date = fname.replace('.csv', '').replace('.xlsx', '')
-                    
-                    if fname.endswith('.xlsx'):
-                        df = pd.read_excel(f)
-                    else:
-                        df = pd.read_csv(f)
-                    
-                    all_data[file_date] = df
-                    st.success(f"✅ {fname}: {len(df)} 条记录")
+                # 读取上传的文件
+                if tracker_file.name.endswith('.xlsx'):
+                    uploaded_df = pd.read_excel(tracker_file)
+                else:
+                    uploaded_df = pd.read_csv(tracker_file)
                 
-                # 按日期排序
-                sorted_dates = sorted(all_data.keys())
-                st.info(f"📅 已加载 {len(sorted_dates)} 天数据: {sorted_dates}")
-                
-                # 获取最新日期的数据
-                latest_date = sorted_dates[-1]
-                latest_df = all_data[latest_date]
-                
-                # 获取前一天数据（如果有）
-                prev_df = None
-                prev_date = None
-                if len(sorted_dates) >= 2:
-                    prev_date = sorted_dates[-2]
-                    prev_df = all_data[prev_date]
+                st.success(f"✅ 已加载今日数据 ({today_date_str}): {len(uploaded_df)} 条记录")
                 
                 # 提取100只股票
                 watchlist = get_watchlist_flat()
@@ -7256,31 +7279,58 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                     
                     return pd.DataFrame(results)
                 
-                # 解析数据
-                today_df = parse_stock_data(latest_df, latest_date)
-                yesterday_df = parse_stock_data(prev_df, prev_date) if prev_df is not None else None
+                # 解析今日数据
+                today_df = parse_stock_data(uploaded_df, today_date_str)
+                st.success(f"📊 今日数据 ({today_date_str}): 匹配到 {len(today_df)} 只追踪股票")
                 
-                st.success(f"📊 最新数据 ({latest_date}): 匹配到 {len(today_df)} 只追踪股票")
+                # ========== 从历史数据库获取前一天数据 ==========
+                yesterday_df = None
+                prev_date = None
+                has_prev_data = False
+                
+                if not history_df.empty and 'Date' in history_df.columns:
+                    # 获取前一天数据
+                    prev_day_data = get_previous_day_data(history_df, today_date_str, days_back=1)
+                    
+                    if prev_day_data is not None and not prev_day_data.empty:
+                        prev_date = prev_day_data['Date'].iloc[0]
+                        yesterday_df = prev_day_data
+                        st.info(f"📅 自动加载历史数据: {prev_date} ({len(yesterday_df)} 条)")
+                        has_prev_data = True
+                    else:
+                        st.warning("⚠️ 历史数据库中无前一天数据，无法计算变化量。请先保存今日数据。")
                 
                 # ========== 计算变化量 ==========
-                if yesterday_df is not None:
-                    # 合并今昨数据
-                    merged = today_df.merge(
-                        yesterday_df[['Symbol', 'Delta_Ratio', 'Gamma_Ratio', 'Volume_Ratio', 'Price', 'DPI%']],
-                        on='Symbol',
-                        suffixes=('', '_prev'),
-                        how='left'
-                    )
+                if has_prev_data and yesterday_df is not None:
+                    # 确保列存在
+                    required_cols = ['Symbol', 'Delta_Ratio', 'Gamma_Ratio', 'Volume_Ratio', 'Price', 'DPI%']
+                    missing_cols = [c for c in required_cols if c not in yesterday_df.columns]
                     
-                    # 计算变化
-                    merged['DR_Change'] = merged['Delta_Ratio'] - merged['Delta_Ratio_prev']
-                    merged['GR_Change'] = merged['Gamma_Ratio'] - merged['Gamma_Ratio_prev']
-                    merged['VR_Change'] = merged['Volume_Ratio'] - merged['Volume_Ratio_prev']
-                    merged['Price_Change%'] = ((merged['Price'] - merged['Price_prev']) / merged['Price_prev'] * 100).round(2)
-                    merged['DPI_Change'] = merged['DPI%'] - merged['DPI%_prev']
-                    
-                    today_df = merged
-                    has_prev_data = True
+                    if not missing_cols:
+                        # 合并今昨数据
+                        merged = today_df.merge(
+                            yesterday_df[required_cols],
+                            on='Symbol',
+                            suffixes=('', '_prev'),
+                            how='left'
+                        )
+                        
+                        # 计算变化
+                        merged['DR_Change'] = merged['Delta_Ratio'] - merged['Delta_Ratio_prev']
+                        merged['GR_Change'] = merged['Gamma_Ratio'] - merged['Gamma_Ratio_prev']
+                        merged['VR_Change'] = merged['Volume_Ratio'] - merged['Volume_Ratio_prev']
+                        merged['Price_Change%'] = ((merged['Price'] - merged['Price_prev']) / merged['Price_prev'] * 100).round(2)
+                        merged['DPI_Change'] = merged['DPI%'] - merged['DPI%_prev']
+                        
+                        today_df = merged
+                        
+                        # 显示变化统计
+                        valid_changes = merged['DR_Change'].dropna()
+                        if not valid_changes.empty:
+                            st.success(f"✅ 已计算 {len(valid_changes)} 只股票的变化量 (对比 {prev_date})")
+                    else:
+                        st.warning(f"⚠️ 历史数据缺少列: {missing_cols}")
+                        has_prev_data = False
                 else:
                     today_df['DR_Change'] = None
                     today_df['GR_Change'] = None
@@ -7944,40 +7994,61 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                 
                 # ========== 保存到Google Sheets ==========
                 st.subheader("☁️ 数据存储")
+                st.caption("💡 保存今日数据后，明天上传新数据时会自动对比计算变化量")
                 
-                TRACKER_WS = "tracker_100_daily"
-                
-                col_save1, col_save2, col_save3 = st.columns(3)
+                col_save1, col_save2, col_save3, col_save4 = st.columns(4)
                 
                 with col_save1:
-                    if st.button("💾 保存今日数据", key="save_tracker_data", use_container_width=True):
+                    if st.button("💾 保存今日数据", key="save_tracker_data", type="primary", use_container_width=True):
                         save_data = {}
                         for _, row in today_df.iterrows():
                             symbol = row['Symbol']
-                            row_dict = {k: (None if pd.isna(v) else v) for k, v in row.to_dict().items()}
-                            save_data[f"{latest_date}_{symbol}"] = row_dict
+                            # 只保存核心列，避免保存_prev列
+                            core_cols = ['Date', 'Symbol', 'Sector', 'Price', 'Call_Wall', 'Put_Wall', 
+                                        'Key_Gamma', 'Hedge_Wall', 'Dist_CW%', 'Dist_PW%', 'Dist_KG%',
+                                        'Delta_Ratio', 'Gamma_Ratio', 'Volume_Ratio', 'DPI%', '5d_DPI%',
+                                        'Next_Exp_Gamma', 'Options_Impact', 'IV_Rank']
+                            row_dict = {}
+                            for col in core_cols:
+                                if col in row.index:
+                                    val = row[col]
+                                    row_dict[col] = None if pd.isna(val) else val
+                            row_dict['Date'] = today_date_str  # 确保使用正确的日期
+                            save_data[f"{today_date_str}_{symbol}"] = row_dict
                         
                         existing = load_worksheet_data(TRACKER_WS) or {}
                         existing.update(save_data)
                         
                         if save_worksheet_data(TRACKER_WS, existing):
-                            st.success(f"✅ 已保存 {len(today_df)} 条记录")
+                            st.success(f"✅ 已保存 {len(today_df)} 条记录到 {today_date_str}")
+                            st.cache_data.clear()  # 清除缓存以便下次读取最新数据
                         else:
                             st.error("❌ 保存失败")
                 
                 with col_save2:
-                    if st.button("📥 加载历史", key="load_tracker_history", use_container_width=True):
+                    if st.button("📥 查看历史", key="load_tracker_history", use_container_width=True):
                         history = load_worksheet_data(TRACKER_WS)
                         if history:
-                            st.success(f"✅ 已加载 {len(history)} 条历史记录")
-                            history_df = pd.DataFrame(list(history.values()))
-                            if not history_df.empty and 'Date' in history_df.columns:
-                                dates = sorted(history_df['Date'].unique(), reverse=True)
+                            st.success(f"✅ 历史数据库: {len(history)} 条记录")
+                            hist_df = pd.DataFrame(list(history.values()))
+                            if not hist_df.empty and 'Date' in hist_df.columns:
+                                dates = sorted(hist_df['Date'].unique(), reverse=True)
                                 st.write(f"包含日期: {dates[:10]}")
+                                
+                                # 显示每天的记录数
+                                date_counts = hist_df.groupby('Date').size().sort_index(ascending=False)
+                                st.write("每日记录数:")
+                                st.dataframe(date_counts.head(10), use_container_width=True)
                         else:
                             st.warning("无历史数据")
                 
                 with col_save3:
+                    if st.button("🔄 刷新缓存", key="refresh_tracker_cache", use_container_width=True):
+                        st.cache_data.clear()
+                        st.success("✅ 缓存已刷新")
+                        st.rerun()
+                
+                with col_save4:
                     if st.button("🗑️ 清空历史", key="clear_tracker_history", use_container_width=True):
                         if save_worksheet_data(TRACKER_WS, {}):
                             st.success("✅ 已清空历史数据")
@@ -7989,7 +8060,7 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                 import traceback
                 st.code(traceback.format_exc())
         else:
-            st.info("👆 请上传每日期权数据CSV文件（支持多天数据对比）")
+            st.info("👆 请上传今日期权数据CSV文件，系统会自动从历史数据库读取前几天数据进行对比")
 
     # ========== Tab 9: 盘前扫描 ==========
     with tab9:
@@ -8067,7 +8138,23 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                     
                     # 盘前价格
                     pre_price = info.get('preMarketPrice')
-                    prev_close = info.get('previousClose') or info.get('regularMarketPreviousClose')
+                    
+                    # ========== 修复：用 history() 获取准确的昨收价 ==========
+                    # info['previousClose'] 在盘前可能返回前天的数据
+                    # 用 history(period='2d') 获取最后一个交易日的收盘价
+                    try:
+                        hist = ticker.history(period='2d')
+                        if len(hist) >= 1:
+                            # history 返回的最后一条是最近交易日的数据
+                            prev_close = hist['Close'].iloc[-1]
+                        else:
+                            # fallback 到 info
+                            prev_close = info.get('previousClose') or info.get('regularMarketPreviousClose')
+                    except Exception:
+                        # 如果 history 失败，fallback 到 info
+                        prev_close = info.get('previousClose') or info.get('regularMarketPreviousClose')
+                    # ========== 修复结束 ==========
+                    
                     current_price = info.get('regularMarketPrice') or prev_close
                     
                     # 计算盘前涨跌幅
