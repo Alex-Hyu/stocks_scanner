@@ -8055,6 +8055,444 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                         else:
                             st.error("❌ 清空失败")
                 
+                st.divider()
+                
+                # ========== 信号追踪验证系统 ==========
+                st.subheader("📊 信号追踪验证系统")
+                st.caption("追踪信号准确率：D0(日内) + D5(周度)，用于验证和优化信号逻辑")
+                
+                # Google Sheets 工作表名称
+                SIGNAL_D0_WS = "tracker_signal_d0"  # 日内信号
+                SIGNAL_D5_WS = "tracker_signal_d5"  # 周度信号
+                ACCURACY_WS = "tracker_accuracy"     # 正确率汇总
+                
+                # 获取当天有信号的股票
+                if signals:
+                    signals_with_direction = [s for s in signals if s.get('SignalDir') in ['bullish', 'bearish']]
+                    
+                    if signals_with_direction:
+                        st.info(f"📋 今日共 {len(signals_with_direction)} 个有方向的信号可追踪")
+                        
+                        # Tab切换
+                        track_tab1, track_tab2, track_tab3 = st.tabs([
+                            "📝 保存今日信号",
+                            "✅ D0日内验证",
+                            "📅 D5周度验证"
+                        ])
+                        
+                        with track_tab1:
+                            st.markdown("### 📝 保存今日信号到追踪系统")
+                            st.caption("盘前保存信号，收盘后验证结果")
+                            
+                            # 显示今日信号预览
+                            preview_data = []
+                            for sig in signals_with_direction[:20]:
+                                preview_data.append({
+                                    'Symbol': sig['Symbol'],
+                                    'Type': sig['Type'],
+                                    'Signal': sig['Signal'],
+                                    'Strength': sig.get('Final_Strength', sig.get('Strength', 0)),
+                                    'Direction': '做多' if sig['SignalDir'] == 'bullish' else '做空',
+                                    'DR': f"{sig.get('DR', 0):.2f}" if sig.get('DR') else "N/A",
+                                })
+                            
+                            st.dataframe(pd.DataFrame(preview_data), hide_index=True, use_container_width=True)
+                            
+                            # 获取开盘价
+                            st.markdown("---")
+                            col_open1, col_open2 = st.columns([2, 1])
+                            
+                            with col_open1:
+                                if st.button("📥 获取开盘价并保存信号", key="save_signals_for_tracking", type="primary", use_container_width=True):
+                                    with st.spinner("正在获取开盘价..."):
+                                        save_count = 0
+                                        existing_d0 = load_worksheet_data(SIGNAL_D0_WS) or {}
+                                        
+                                        # 判断是否周一（用于D5追踪）
+                                        is_monday = data_date.weekday() == 0
+                                        week_str = data_date.strftime('%Y-W%W')
+                                        existing_d5 = load_worksheet_data(SIGNAL_D5_WS) or {} if is_monday else {}
+                                        
+                                        for sig in signals_with_direction:
+                                            symbol = sig['Symbol']
+                                            try:
+                                                ticker = yf.Ticker(symbol)
+                                                hist = ticker.history(period="5d")
+                                                
+                                                if not hist.empty:
+                                                    # 获取今日开盘价
+                                                    today_data = hist[hist.index.date == data_date]
+                                                    if not today_data.empty:
+                                                        open_price = float(today_data['Open'].iloc[0])
+                                                    else:
+                                                        open_price = float(hist['Open'].iloc[-1])
+                                                    
+                                                    # 保存D0信号
+                                                    d0_key = f"{today_date_str}_{symbol}"
+                                                    existing_d0[d0_key] = {
+                                                        'symbol': symbol,
+                                                        'date': today_date_str,
+                                                        'signal_type': sig['Type'],
+                                                        'signal_name': sig['Signal'],
+                                                        'signal_dir': sig['SignalDir'],
+                                                        'strength': sig.get('Final_Strength', sig.get('Strength', 0)),
+                                                        'open_price': open_price,
+                                                        'close_price': None,
+                                                        'change_pct': None,
+                                                        'result': None,
+                                                        'verified': False,
+                                                        'dr': sig.get('DR'),
+                                                        'gr': sig.get('GR'),
+                                                        'vr': sig.get('VR'),
+                                                        'tech_confirm': sig.get('Tech_Confirm', ''),
+                                                    }
+                                                    
+                                                    # 如果是周一，同时保存D5信号
+                                                    if is_monday:
+                                                        d5_key = f"{week_str}_{symbol}"
+                                                        existing_d5[d5_key] = {
+                                                            'symbol': symbol,
+                                                            'week': week_str,
+                                                            'd0_date': today_date_str,
+                                                            'd5_date': None,
+                                                            'signal_type': sig['Type'],
+                                                            'signal_name': sig['Signal'],
+                                                            'signal_dir': sig['SignalDir'],
+                                                            'strength': sig.get('Final_Strength', sig.get('Strength', 0)),
+                                                            'd0_open': open_price,
+                                                            'd5_close': None,
+                                                            'change_pct': None,
+                                                            'result': None,
+                                                            'verified': False,
+                                                        }
+                                                    
+                                                    save_count += 1
+                                            except Exception as e:
+                                                st.warning(f"{symbol}: 获取价格失败 - {e}")
+                                        
+                                        # 保存到Google Sheets
+                                        if save_worksheet_data(SIGNAL_D0_WS, existing_d0):
+                                            st.success(f"✅ D0信号已保存: {save_count} 个")
+                                        
+                                        if is_monday and existing_d5:
+                                            if save_worksheet_data(SIGNAL_D5_WS, existing_d5):
+                                                st.success(f"✅ D5信号已保存 (周一): {save_count} 个")
+                            
+                            with col_open2:
+                                # 显示当前周几
+                                weekday_names = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
+                                st.metric("今日", weekday_names[data_date.weekday()])
+                                if data_date.weekday() == 0:
+                                    st.success("📅 周一 - 同时保存D5信号")
+                        
+                        with track_tab2:
+                            st.markdown("### ✅ D0 日内信号验证")
+                            st.caption("收盘后验证当天信号准确率 (收盘价 vs 开盘价)")
+                            
+                            # 加载D0信号
+                            d0_data = load_worksheet_data(SIGNAL_D0_WS) or {}
+                            
+                            if d0_data:
+                                d0_df = pd.DataFrame(list(d0_data.values()))
+                                
+                                if not d0_df.empty and 'date' in d0_df.columns:
+                                    # 按日期分组
+                                    dates = sorted(d0_df['date'].unique(), reverse=True)
+                                    
+                                    selected_date = st.selectbox(
+                                        "选择验证日期",
+                                        dates,
+                                        key="d0_verify_date"
+                                    )
+                                    
+                                    day_signals = d0_df[d0_df['date'] == selected_date]
+                                    unverified = day_signals[day_signals['verified'] == False]
+                                    
+                                    st.info(f"📊 {selected_date}: 共 {len(day_signals)} 个信号 | 未验证: {len(unverified)}")
+                                    
+                                    if not unverified.empty:
+                                        if st.button("🔄 获取收盘价并验证", key="verify_d0", type="primary"):
+                                            with st.spinner("正在验证..."):
+                                                correct = 0
+                                                wrong = 0
+                                                tie = 0
+                                                
+                                                for idx, row in unverified.iterrows():
+                                                    symbol = row['symbol']
+                                                    signal_dir = row['signal_dir']
+                                                    open_price = row['open_price']
+                                                    
+                                                    try:
+                                                        ticker = yf.Ticker(symbol)
+                                                        hist = ticker.history(period="5d")
+                                                        
+                                                        if not hist.empty:
+                                                            # 获取收盘价
+                                                            target_date = datetime.strptime(selected_date, '%Y-%m-%d').date()
+                                                            day_data = hist[hist.index.date == target_date]
+                                                            
+                                                            if not day_data.empty:
+                                                                close_price = float(day_data['Close'].iloc[0])
+                                                            else:
+                                                                close_price = float(hist['Close'].iloc[-1])
+                                                            
+                                                            # 计算涨跌幅
+                                                            if open_price and open_price > 0:
+                                                                change_pct = (close_price - open_price) / open_price * 100
+                                                            else:
+                                                                change_pct = 0
+                                                            
+                                                            # 判断结果
+                                                            if abs(change_pct) < 0.3:
+                                                                result = "➖ 平局"
+                                                                tie += 1
+                                                            elif signal_dir == 'bullish':
+                                                                if change_pct > 0:
+                                                                    result = "✅ 正确"
+                                                                    correct += 1
+                                                                else:
+                                                                    result = "❌ 错误"
+                                                                    wrong += 1
+                                                            else:  # bearish
+                                                                if change_pct < 0:
+                                                                    result = "✅ 正确"
+                                                                    correct += 1
+                                                                else:
+                                                                    result = "❌ 错误"
+                                                                    wrong += 1
+                                                            
+                                                            # 更新数据
+                                                            key = f"{selected_date}_{symbol}"
+                                                            if key in d0_data:
+                                                                d0_data[key]['close_price'] = close_price
+                                                                d0_data[key]['change_pct'] = round(change_pct, 2)
+                                                                d0_data[key]['result'] = result
+                                                                d0_data[key]['verified'] = True
+                                                    
+                                                    except Exception as e:
+                                                        st.warning(f"{symbol}: 验证失败 - {e}")
+                                                
+                                                # 保存更新
+                                                save_worksheet_data(SIGNAL_D0_WS, d0_data)
+                                                
+                                                # 保存正确率
+                                                total = correct + wrong + tie
+                                                if total > 0:
+                                                    accuracy = correct / (correct + wrong) * 100 if (correct + wrong) > 0 else 0
+                                                    
+                                                    accuracy_data = load_worksheet_data(ACCURACY_WS) or {}
+                                                    accuracy_data[f"D0_{selected_date}"] = {
+                                                        'type': 'D0',
+                                                        'date': selected_date,
+                                                        'total': total,
+                                                        'correct': correct,
+                                                        'wrong': wrong,
+                                                        'tie': tie,
+                                                        'accuracy': round(accuracy, 1)
+                                                    }
+                                                    save_worksheet_data(ACCURACY_WS, accuracy_data)
+                                                
+                                                st.success(f"✅ 验证完成: 正确 {correct} | 错误 {wrong} | 平局 {tie} | 正确率 {accuracy:.1f}%")
+                                                st.rerun()
+                                    
+                                    # 显示已验证结果
+                                    verified = day_signals[day_signals['verified'] == True]
+                                    if not verified.empty:
+                                        st.markdown("---")
+                                        st.markdown("**已验证信号:**")
+                                        
+                                        display_verified = verified[['symbol', 'signal_type', 'signal_name', 'signal_dir',
+                                                                    'open_price', 'close_price', 'change_pct', 'result']].copy()
+                                        display_verified.columns = ['股票', '类型', '信号', '方向', '开盘价', '收盘价', '涨跌%', '结果']
+                                        
+                                        st.dataframe(display_verified, hide_index=True, use_container_width=True)
+                                        
+                                        # 统计
+                                        correct_count = len(verified[verified['result'] == '✅ 正确'])
+                                        wrong_count = len(verified[verified['result'] == '❌ 错误'])
+                                        tie_count = len(verified[verified['result'] == '➖ 平局'])
+                                        
+                                        col_acc1, col_acc2, col_acc3, col_acc4 = st.columns(4)
+                                        with col_acc1:
+                                            st.metric("✅ 正确", correct_count)
+                                        with col_acc2:
+                                            st.metric("❌ 错误", wrong_count)
+                                        with col_acc3:
+                                            st.metric("➖ 平局", tie_count)
+                                        with col_acc4:
+                                            if correct_count + wrong_count > 0:
+                                                acc = correct_count / (correct_count + wrong_count) * 100
+                                                st.metric("正确率", f"{acc:.1f}%")
+                            else:
+                                st.info("暂无D0信号数据，请先保存今日信号")
+                        
+                        with track_tab3:
+                            st.markdown("### 📅 D5 周度信号验证")
+                            st.caption("周五收盘后验证周一信号准确率 (周五收盘价 vs 周一开盘价)")
+                            
+                            # 加载D5信号
+                            d5_data = load_worksheet_data(SIGNAL_D5_WS) or {}
+                            
+                            if d5_data:
+                                d5_df = pd.DataFrame(list(d5_data.values()))
+                                
+                                if not d5_df.empty and 'week' in d5_df.columns:
+                                    weeks = sorted(d5_df['week'].unique(), reverse=True)
+                                    
+                                    selected_week = st.selectbox(
+                                        "选择验证周",
+                                        weeks,
+                                        key="d5_verify_week"
+                                    )
+                                    
+                                    week_signals = d5_df[d5_df['week'] == selected_week]
+                                    unverified = week_signals[week_signals['verified'] == False]
+                                    
+                                    st.info(f"📊 {selected_week}: 共 {len(week_signals)} 个信号 | 未验证: {len(unverified)}")
+                                    
+                                    # 只有周五才能验证
+                                    is_friday = data_date.weekday() == 4
+                                    
+                                    if not unverified.empty:
+                                        if is_friday:
+                                            if st.button("🔄 获取周五收盘价并验证", key="verify_d5", type="primary"):
+                                                with st.spinner("正在验证D5信号..."):
+                                                    correct = 0
+                                                    wrong = 0
+                                                    tie = 0
+                                                    friday_date = today_date_str
+                                                    
+                                                    for idx, row in unverified.iterrows():
+                                                        symbol = row['symbol']
+                                                        signal_dir = row['signal_dir']
+                                                        d0_open = row['d0_open']
+                                                        
+                                                        try:
+                                                            ticker = yf.Ticker(symbol)
+                                                            hist = ticker.history(period="5d")
+                                                            
+                                                            if not hist.empty:
+                                                                d5_close = float(hist['Close'].iloc[-1])
+                                                                
+                                                                if d0_open and d0_open > 0:
+                                                                    change_pct = (d5_close - d0_open) / d0_open * 100
+                                                                else:
+                                                                    change_pct = 0
+                                                                
+                                                                # 周度判断阈值更宽松 (1%)
+                                                                if abs(change_pct) < 1.0:
+                                                                    result = "➖ 平局"
+                                                                    tie += 1
+                                                                elif signal_dir == 'bullish':
+                                                                    if change_pct > 0:
+                                                                        result = "✅ 正确"
+                                                                        correct += 1
+                                                                    else:
+                                                                        result = "❌ 错误"
+                                                                        wrong += 1
+                                                                else:
+                                                                    if change_pct < 0:
+                                                                        result = "✅ 正确"
+                                                                        correct += 1
+                                                                    else:
+                                                                        result = "❌ 错误"
+                                                                        wrong += 1
+                                                                
+                                                                key = f"{selected_week}_{symbol}"
+                                                                if key in d5_data:
+                                                                    d5_data[key]['d5_date'] = friday_date
+                                                                    d5_data[key]['d5_close'] = d5_close
+                                                                    d5_data[key]['change_pct'] = round(change_pct, 2)
+                                                                    d5_data[key]['result'] = result
+                                                                    d5_data[key]['verified'] = True
+                                                        
+                                                        except Exception as e:
+                                                            st.warning(f"{symbol}: 验证失败 - {e}")
+                                                    
+                                                    save_worksheet_data(SIGNAL_D5_WS, d5_data)
+                                                    
+                                                    # 保存正确率
+                                                    total = correct + wrong + tie
+                                                    if total > 0:
+                                                        accuracy = correct / (correct + wrong) * 100 if (correct + wrong) > 0 else 0
+                                                        
+                                                        accuracy_data = load_worksheet_data(ACCURACY_WS) or {}
+                                                        accuracy_data[f"D5_{selected_week}"] = {
+                                                            'type': 'D5',
+                                                            'week': selected_week,
+                                                            'total': total,
+                                                            'correct': correct,
+                                                            'wrong': wrong,
+                                                            'tie': tie,
+                                                            'accuracy': round(accuracy, 1)
+                                                        }
+                                                        save_worksheet_data(ACCURACY_WS, accuracy_data)
+                                                    
+                                                    st.success(f"✅ D5验证完成: 正确 {correct} | 错误 {wrong} | 平局 {tie} | 正确率 {accuracy:.1f}%")
+                                                    st.rerun()
+                                        else:
+                                            st.warning(f"⚠️ 今天是{weekday_names[data_date.weekday()]}，D5验证需要在周五进行")
+                                    
+                                    # 显示已验证结果
+                                    verified = week_signals[week_signals['verified'] == True]
+                                    if not verified.empty:
+                                        st.markdown("---")
+                                        st.markdown("**已验证信号:**")
+                                        
+                                        display_verified = verified[['symbol', 'signal_type', 'signal_dir',
+                                                                    'd0_open', 'd5_close', 'change_pct', 'result']].copy()
+                                        display_verified.columns = ['股票', '类型', '方向', '周一开盘', '周五收盘', '涨跌%', '结果']
+                                        
+                                        st.dataframe(display_verified, hide_index=True, use_container_width=True)
+                            else:
+                                st.info("暂无D5信号数据，周一保存信号后自动创建")
+                        
+                        # 正确率汇总
+                        st.markdown("---")
+                        st.markdown("### 📈 历史正确率汇总")
+                        
+                        accuracy_data = load_worksheet_data(ACCURACY_WS) or {}
+                        
+                        if accuracy_data:
+                            acc_df = pd.DataFrame(list(accuracy_data.values()))
+                            
+                            if not acc_df.empty:
+                                col_d0, col_d5 = st.columns(2)
+                                
+                                with col_d0:
+                                    st.markdown("**D0 日内正确率:**")
+                                    d0_acc = acc_df[acc_df['type'] == 'D0'].sort_values('date', ascending=False)
+                                    if not d0_acc.empty:
+                                        st.dataframe(
+                                            d0_acc[['date', 'total', 'correct', 'wrong', 'accuracy']],
+                                            hide_index=True,
+                                            use_container_width=True
+                                        )
+                                        avg_d0 = d0_acc['accuracy'].mean()
+                                        st.metric("平均正确率", f"{avg_d0:.1f}%")
+                                    else:
+                                        st.info("暂无D0数据")
+                                
+                                with col_d5:
+                                    st.markdown("**D5 周度正确率:**")
+                                    d5_acc = acc_df[acc_df['type'] == 'D5'].sort_values('week', ascending=False)
+                                    if not d5_acc.empty:
+                                        st.dataframe(
+                                            d5_acc[['week', 'total', 'correct', 'wrong', 'accuracy']],
+                                            hide_index=True,
+                                            use_container_width=True
+                                        )
+                                        avg_d5 = d5_acc['accuracy'].mean()
+                                        st.metric("平均正确率", f"{avg_d5:.1f}%")
+                                    else:
+                                        st.info("暂无D5数据")
+                        else:
+                            st.info("暂无正确率数据，验证信号后自动生成")
+                    else:
+                        st.info("今日无有方向的信号可追踪")
+                else:
+                    st.info("请先上传数据并生成信号")
+                
             except Exception as e:
                 st.error(f"❌ 处理失败: {e}")
                 import traceback
@@ -8138,23 +8576,7 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                     
                     # 盘前价格
                     pre_price = info.get('preMarketPrice')
-                    
-                    # ========== 修复：用 history() 获取准确的昨收价 ==========
-                    # info['previousClose'] 在盘前可能返回前天的数据
-                    # 用 history(period='2d') 获取最后一个交易日的收盘价
-                    try:
-                        hist = ticker.history(period='2d')
-                        if len(hist) >= 1:
-                            # history 返回的最后一条是最近交易日的数据
-                            prev_close = hist['Close'].iloc[-1]
-                        else:
-                            # fallback 到 info
-                            prev_close = info.get('previousClose') or info.get('regularMarketPreviousClose')
-                    except Exception:
-                        # 如果 history 失败，fallback 到 info
-                        prev_close = info.get('previousClose') or info.get('regularMarketPreviousClose')
-                    # ========== 修复结束 ==========
-                    
+                    prev_close = info.get('previousClose') or info.get('regularMarketPreviousClose')
                     current_price = info.get('regularMarketPrice') or prev_close
                     
                     # 计算盘前涨跌幅
