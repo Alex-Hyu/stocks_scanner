@@ -8098,15 +8098,26 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                             
                             st.dataframe(pd.DataFrame(preview_data), hide_index=True, use_container_width=True)
                             
-                            # 获取开盘价
+                            # 获取基准价格（CSV数据日期的收盘价）
                             st.markdown("---")
+                            st.markdown("""
+                            **📋 信号验证逻辑说明：**
+                            - 上传的CSV是**昨天**的期权数据，用来预测**今天**的走势
+                            - D0验证：今天收盘价 vs **昨天收盘价**（CSV数据日期）
+                            - D5验证：本周五收盘价 vs **上周五收盘价**（周一CSV数据日期）
+                            """)
+                            
                             col_open1, col_open2 = st.columns([2, 1])
                             
                             with col_open1:
-                                if st.button("📥 获取开盘价并保存信号", key="save_signals_for_tracking", type="primary", use_container_width=True):
-                                    with st.spinner("正在获取开盘价..."):
+                                if st.button("📥 保存信号（获取基准收盘价）", key="save_signals_for_tracking", type="primary", use_container_width=True):
+                                    with st.spinner("正在获取基准价格..."):
                                         save_count = 0
                                         existing_d0 = load_worksheet_data(SIGNAL_D0_WS) or {}
+                                        
+                                        # CSV数据日期 = 信号基准日期（昨天）
+                                        # data_date = 今天（预测目标日期）
+                                        signal_base_date = today_date_str  # CSV中的数据日期
                                         
                                         # 判断是否周一（用于D5追踪）
                                         is_monday = data_date.weekday() == 0
@@ -8117,27 +8128,42 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                             symbol = sig['Symbol']
                                             try:
                                                 ticker = yf.Ticker(symbol)
-                                                hist = ticker.history(period="5d")
+                                                hist = ticker.history(period="10d")
                                                 
                                                 if not hist.empty:
-                                                    # 获取今日开盘价
-                                                    today_data = hist[hist.index.date == data_date]
-                                                    if not today_data.empty:
-                                                        open_price = float(today_data['Open'].iloc[0])
+                                                    # 获取CSV数据日期（昨天）的收盘价作为基准
+                                                    # 这是信号发出时的基准价格
+                                                    base_date = data_date
+                                                    base_data = hist[hist.index.date == base_date]
+                                                    
+                                                    if not base_data.empty:
+                                                        base_close = float(base_data['Close'].iloc[0])
                                                     else:
-                                                        open_price = float(hist['Open'].iloc[-1])
+                                                        # 如果找不到精确日期，用最近的收盘价
+                                                        base_close = float(hist['Close'].iloc[-1])
                                                     
                                                     # 保存D0信号
-                                                    d0_key = f"{today_date_str}_{symbol}"
+                                                    # predict_date = 预测的目标日期（明天）
+                                                    predict_date = (data_date + timedelta(days=1))
+                                                    # 跳过周末
+                                                    if predict_date.weekday() == 5:  # 周六
+                                                        predict_date = predict_date + timedelta(days=2)
+                                                    elif predict_date.weekday() == 6:  # 周日
+                                                        predict_date = predict_date + timedelta(days=1)
+                                                    
+                                                    predict_date_str = predict_date.strftime('%Y-%m-%d')
+                                                    
+                                                    d0_key = f"{predict_date_str}_{symbol}"
                                                     existing_d0[d0_key] = {
                                                         'symbol': symbol,
-                                                        'date': today_date_str,
+                                                        'signal_date': signal_base_date,  # CSV数据日期
+                                                        'predict_date': predict_date_str,  # 预测目标日期
                                                         'signal_type': sig['Type'],
                                                         'signal_name': sig['Signal'],
                                                         'signal_dir': sig['SignalDir'],
                                                         'strength': sig.get('Final_Strength', sig.get('Strength', 0)),
-                                                        'open_price': open_price,
-                                                        'close_price': None,
+                                                        'base_close': base_close,  # 基准收盘价（CSV日期）
+                                                        'target_close': None,  # 目标收盘价（预测日期）
                                                         'change_pct': None,
                                                         'result': None,
                                                         'verified': False,
@@ -8149,18 +8175,22 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                                     
                                                     # 如果是周一，同时保存D5信号
                                                     if is_monday:
+                                                        # D5: 上周五收盘 vs 本周五收盘
+                                                        friday_date = data_date + timedelta(days=4)  # 本周五
+                                                        friday_date_str = friday_date.strftime('%Y-%m-%d')
+                                                        
                                                         d5_key = f"{week_str}_{symbol}"
                                                         existing_d5[d5_key] = {
                                                             'symbol': symbol,
                                                             'week': week_str,
-                                                            'd0_date': today_date_str,
-                                                            'd5_date': None,
+                                                            'd0_date': signal_base_date,  # 上周五（CSV数据日期）
+                                                            'd5_date': friday_date_str,   # 本周五
                                                             'signal_type': sig['Type'],
                                                             'signal_name': sig['Signal'],
                                                             'signal_dir': sig['SignalDir'],
                                                             'strength': sig.get('Final_Strength', sig.get('Strength', 0)),
-                                                            'd0_open': open_price,
-                                                            'd5_close': None,
+                                                            'd0_close': base_close,  # 上周五收盘价
+                                                            'd5_close': None,        # 本周五收盘价
                                                             'change_pct': None,
                                                             'result': None,
                                                             'verified': False,
@@ -8172,7 +8202,7 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                         
                                         # 保存到Google Sheets
                                         if save_worksheet_data(SIGNAL_D0_WS, existing_d0):
-                                            st.success(f"✅ D0信号已保存: {save_count} 个")
+                                            st.success(f"✅ D0信号已保存: {save_count} 个 (基准日期: {signal_base_date})")
                                         
                                         if is_monday and existing_d5:
                                             if save_worksheet_data(SIGNAL_D5_WS, existing_d5):
@@ -8181,13 +8211,14 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                             with col_open2:
                                 # 显示当前周几
                                 weekday_names = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
-                                st.metric("今日", weekday_names[data_date.weekday()])
+                                st.metric("CSV数据日期", today_date_str)
+                                st.metric("今日周几", weekday_names[data_date.weekday()])
                                 if data_date.weekday() == 0:
                                     st.success("📅 周一 - 同时保存D5信号")
                         
                         with track_tab2:
                             st.markdown("### ✅ D0 日内信号验证")
-                            st.caption("收盘后验证当天信号准确率 (收盘价 vs 开盘价)")
+                            st.caption("收盘后验证信号准确率：**目标日收盘价 vs 基准日收盘价**")
                             
                             # 加载D0信号
                             d0_data = load_worksheet_data(SIGNAL_D0_WS) or {}
@@ -8195,23 +8226,32 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                             if d0_data:
                                 d0_df = pd.DataFrame(list(d0_data.values()))
                                 
-                                if not d0_df.empty and 'date' in d0_df.columns:
-                                    # 按日期分组
-                                    dates = sorted(d0_df['date'].unique(), reverse=True)
+                                # 兼容新旧数据格式
+                                if 'predict_date' in d0_df.columns:
+                                    date_col = 'predict_date'
+                                elif 'date' in d0_df.columns:
+                                    date_col = 'date'
+                                else:
+                                    st.warning("数据格式不兼容")
+                                    date_col = None
+                                
+                                if date_col and not d0_df.empty:
+                                    # 按预测日期分组
+                                    dates = sorted(d0_df[date_col].dropna().unique(), reverse=True)
                                     
                                     selected_date = st.selectbox(
-                                        "选择验证日期",
+                                        "选择验证日期（预测目标日期）",
                                         dates,
                                         key="d0_verify_date"
                                     )
                                     
-                                    day_signals = d0_df[d0_df['date'] == selected_date]
+                                    day_signals = d0_df[d0_df[date_col] == selected_date]
                                     unverified = day_signals[day_signals['verified'] == False]
                                     
-                                    st.info(f"📊 {selected_date}: 共 {len(day_signals)} 个信号 | 未验证: {len(unverified)}")
+                                    st.info(f"📊 预测日期 {selected_date}: 共 {len(day_signals)} 个信号 | 未验证: {len(unverified)}")
                                     
                                     if not unverified.empty:
-                                        if st.button("🔄 获取收盘价并验证", key="verify_d0", type="primary"):
+                                        if st.button("🔄 获取目标日收盘价并验证", key="verify_d0", type="primary"):
                                             with st.spinner("正在验证..."):
                                                 correct = 0
                                                 wrong = 0
@@ -8220,25 +8260,27 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                                 for idx, row in unverified.iterrows():
                                                     symbol = row['symbol']
                                                     signal_dir = row['signal_dir']
-                                                    open_price = row['open_price']
+                                                    # 使用新字段名，兼容旧数据
+                                                    base_close = row.get('base_close') or row.get('open_price')
+                                                    predict_date = row.get('predict_date') or row.get('date')
                                                     
                                                     try:
                                                         ticker = yf.Ticker(symbol)
-                                                        hist = ticker.history(period="5d")
+                                                        hist = ticker.history(period="10d")
                                                         
                                                         if not hist.empty:
-                                                            # 获取收盘价
-                                                            target_date = datetime.strptime(selected_date, '%Y-%m-%d').date()
+                                                            # 获取预测目标日期的收盘价
+                                                            target_date = datetime.strptime(predict_date, '%Y-%m-%d').date()
                                                             day_data = hist[hist.index.date == target_date]
                                                             
                                                             if not day_data.empty:
-                                                                close_price = float(day_data['Close'].iloc[0])
+                                                                target_close = float(day_data['Close'].iloc[0])
                                                             else:
-                                                                close_price = float(hist['Close'].iloc[-1])
+                                                                target_close = float(hist['Close'].iloc[-1])
                                                             
-                                                            # 计算涨跌幅
-                                                            if open_price and open_price > 0:
-                                                                change_pct = (close_price - open_price) / open_price * 100
+                                                            # 计算涨跌幅: 目标日收盘 vs 基准日收盘
+                                                            if base_close and base_close > 0:
+                                                                change_pct = (target_close - base_close) / base_close * 100
                                                             else:
                                                                 change_pct = 0
                                                             
@@ -8262,9 +8304,9 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                                                     wrong += 1
                                                             
                                                             # 更新数据
-                                                            key = f"{selected_date}_{symbol}"
+                                                            key = f"{predict_date}_{symbol}"
                                                             if key in d0_data:
-                                                                d0_data[key]['close_price'] = close_price
+                                                                d0_data[key]['target_close'] = target_close
                                                                 d0_data[key]['change_pct'] = round(change_pct, 2)
                                                                 d0_data[key]['result'] = result
                                                                 d0_data[key]['verified'] = True
@@ -8301,9 +8343,36 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                         st.markdown("---")
                                         st.markdown("**已验证信号:**")
                                         
-                                        display_verified = verified[['symbol', 'signal_type', 'signal_name', 'signal_dir',
-                                                                    'open_price', 'close_price', 'change_pct', 'result']].copy()
-                                        display_verified.columns = ['股票', '类型', '信号', '方向', '开盘价', '收盘价', '涨跌%', '结果']
+                                        # 兼容新旧字段名
+                                        display_cols = []
+                                        col_names = []
+                                        
+                                        display_cols.append('symbol')
+                                        col_names.append('股票')
+                                        display_cols.append('signal_type')
+                                        col_names.append('类型')
+                                        display_cols.append('signal_dir')
+                                        col_names.append('方向')
+                                        
+                                        if 'base_close' in verified.columns:
+                                            display_cols.append('base_close')
+                                            col_names.append('基准收盘价')
+                                        elif 'open_price' in verified.columns:
+                                            display_cols.append('open_price')
+                                            col_names.append('基准价')
+                                        
+                                        if 'target_close' in verified.columns:
+                                            display_cols.append('target_close')
+                                            col_names.append('目标收盘价')
+                                        elif 'close_price' in verified.columns:
+                                            display_cols.append('close_price')
+                                            col_names.append('收盘价')
+                                        
+                                        display_cols.extend(['change_pct', 'result'])
+                                        col_names.extend(['涨跌%', '结果'])
+                                        
+                                        display_verified = verified[[c for c in display_cols if c in verified.columns]].copy()
+                                        display_verified.columns = col_names[:len(display_verified.columns)]
                                         
                                         st.dataframe(display_verified, hide_index=True, use_container_width=True)
                                         
@@ -8328,7 +8397,7 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                         
                         with track_tab3:
                             st.markdown("### 📅 D5 周度信号验证")
-                            st.caption("周五收盘后验证周一信号准确率 (周五收盘价 vs 周一开盘价)")
+                            st.caption("周五收盘后验证周一信号准确率：**本周五收盘价 vs 上周五收盘价**")
                             
                             # 加载D5信号
                             d5_data = load_worksheet_data(SIGNAL_D5_WS) or {}
@@ -8355,7 +8424,7 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                     
                                     if not unverified.empty:
                                         if is_friday:
-                                            if st.button("🔄 获取周五收盘价并验证", key="verify_d5", type="primary"):
+                                            if st.button("🔄 获取本周五收盘价并验证", key="verify_d5", type="primary"):
                                                 with st.spinner("正在验证D5信号..."):
                                                     correct = 0
                                                     wrong = 0
@@ -8365,17 +8434,20 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                                     for idx, row in unverified.iterrows():
                                                         symbol = row['symbol']
                                                         signal_dir = row['signal_dir']
-                                                        d0_open = row['d0_open']
+                                                        # 使用上周五收盘价作为基准
+                                                        d0_close = row.get('d0_close') or row.get('d0_open')
                                                         
                                                         try:
                                                             ticker = yf.Ticker(symbol)
-                                                            hist = ticker.history(period="5d")
+                                                            hist = ticker.history(period="10d")
                                                             
                                                             if not hist.empty:
+                                                                # 获取本周五收盘价
                                                                 d5_close = float(hist['Close'].iloc[-1])
                                                                 
-                                                                if d0_open and d0_open > 0:
-                                                                    change_pct = (d5_close - d0_open) / d0_open * 100
+                                                                # 计算: 本周五收盘 vs 上周五收盘
+                                                                if d0_close and d0_close > 0:
+                                                                    change_pct = (d5_close - d0_close) / d0_close * 100
                                                                 else:
                                                                     change_pct = 0
                                                                 
