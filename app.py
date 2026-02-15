@@ -3369,209 +3369,242 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                 # QQQ的Hedge Wall用Zero Gamma
                 today_hw = parse_number_safe(str(csv_data.get('Zero Gamma', ''))) or qqq.get('zero_gamma')
                 
-                # 先行指标
-                ne_skew = csv_data.get('NE Skew') or csv_data.get('Next Exp Skew')
-                dpi_5d = csv_data.get('5Day DPI') or csv_data.get('5 day DPI')
+                # 今日DPI（读取DPI列，不是%DPI Volume）
+                today_dpi = parse_number_safe(str(csv_data.get('DPI', '')))
+                if today_dpi is not None and today_dpi <= 1:
+                    today_dpi = today_dpi * 100
+                
+                # 今日NE Skew
+                ne_raw = csv_data.get('NE Skew') or csv_data.get('Next Exp Skew')
+                today_ne_skew = None
+                if ne_raw is not None:
+                    ne_val = parse_number_safe(str(ne_raw).replace('%', ''))
+                    if ne_val is not None:
+                        today_ne_skew = ne_val * 100 if abs(ne_val) <= 1 else ne_val
+                
+                # 5Day DPI
+                dpi_5d_raw = csv_data.get('5Day DPI') or csv_data.get('5 day DPI')
+                today_dpi_5d = parse_number_safe(str(dpi_5d_raw).replace('%', '')) if dpi_5d_raw else None
+                if today_dpi_5d is not None and today_dpi_5d <= 1:
+                    today_dpi_5d = today_dpi_5d * 100
             
-            # 显示今日VR/GR/DR
+            # 从CSV读取T-1数据（用于VR/GR/DR变化计算）
+            prev_vr = None
+            prev_gr = None
+            prev_dr = None
+            prev_date_str = None
+            
+            if csv_data_prev:
+                prev_vr = parse_number_safe(str(csv_data_prev.get('Volume Ratio', '')))
+                prev_gr = parse_number_safe(str(csv_data_prev.get('Gamma Ratio', '')))
+                prev_dr = parse_number_safe(csv_data_prev.get('Delta Ratio'))
+                prev_date_str = csv_data_prev.get('Date', 'T-1')
+            
+            # 从CSV读取T-2数据（用于DPI/NE Skew变化计算）
+            prev2_dpi = None
+            prev2_ne_skew = None
+            prev2_date_str = None
+            
+            if csv_data_prev2:
+                prev2_dpi = parse_number_safe(str(csv_data_prev2.get('DPI', '')))
+                if prev2_dpi is not None and prev2_dpi <= 1:
+                    prev2_dpi = prev2_dpi * 100
+                
+                ne_raw2 = csv_data_prev2.get('NE Skew') or csv_data_prev2.get('Next Exp Skew')
+                if ne_raw2 is not None:
+                    ne_val2 = parse_number_safe(str(ne_raw2).replace('%', ''))
+                    if ne_val2 is not None:
+                        prev2_ne_skew = ne_val2 * 100 if abs(ne_val2) <= 1 else ne_val2
+                prev2_date_str = csv_data_prev2.get('Date', 'T-2')
+            
+            # 计算VR/GR/DR变化量 (T vs T-1)
+            vr_change = (today_vr - prev_vr) if (today_vr is not None and prev_vr is not None) else None
+            gr_change = (today_gr - prev_gr) if (today_gr is not None and prev_gr is not None) else None
+            dr_change = (today_dr - prev_dr) if (today_dr is not None and prev_dr is not None) else None
+            
+            # 计算先行指标变化量 (T vs T-2)
+            dpi_change_t2 = (today_dpi - prev2_dpi) if (today_dpi is not None and prev2_dpi is not None) else None
+            ne_skew_change_t2 = (today_ne_skew - prev2_ne_skew) if (today_ne_skew is not None and prev2_ne_skew is not None) else None
+            
+            # 显示VR/GR/DR及变化
+            st.markdown("**📊 VR/GR/DR (T vs T-1)**")
+            if prev_date_str:
+                st.caption(f"对比: {prev_date_str} → 今日")
+            
             col_vgd1, col_vgd2, col_vgd3, col_vgd4 = st.columns(4)
             with col_vgd1:
-                st.metric("Volume Ratio", f"{today_vr:.2f}" if today_vr else "N/A")
+                vr_delta = f"{vr_change:+.2f}" if vr_change is not None else None
+                st.metric("VR", f"{today_vr:.2f}" if today_vr else "N/A", delta=vr_delta)
             with col_vgd2:
-                st.metric("Gamma Ratio", f"{today_gr:.2f}" if today_gr else "N/A")
+                gr_delta = f"{gr_change:+.2f}" if gr_change is not None else None
+                st.metric("GR", f"{today_gr:.2f}" if today_gr else "N/A", delta=gr_delta)
             with col_vgd3:
-                st.metric("Delta Ratio", f"{today_dr:.2f}" if today_dr else "N/A")
+                dr_delta = f"{dr_change:+.2f}" if dr_change is not None else None
+                st.metric("DR", f"{today_dr:.2f}" if today_dr else "N/A", delta=dr_delta)
             with col_vgd4:
                 st.metric("Zero Gamma", f"{today_hw:.0f}" if today_hw else "N/A")
             
-            # 日期输入
-            data_date_qqq = st.date_input("CSV数据日期", value=datetime.now().date(), key="qqq_data_date")
-            data_date_str = data_date_qqq.strftime('%Y-%m-%d')
+            # 显示先行指标 (T vs T-2)
+            st.markdown("**⏰ 先行指标 (T vs T-2)**")
+            if prev2_date_str:
+                st.caption(f"对比: {prev2_date_str} → 今日")
             
-            # 保存今日数据按钮
-            col_save_vgd1, col_save_vgd2 = st.columns([1, 2])
-            with col_save_vgd1:
-                if st.button("💾 保存VR/GR/DR数据", key="save_qqq_vgd"):
-                    if today_vr and today_gr and today_dr:
-                        qqq_daily_history[data_date_str] = {
-                            'date': data_date_str,
-                            'vr': today_vr,
-                            'gr': today_gr,
-                            'dr': today_dr,
-                            'hw': today_hw,
-                            'price': qqq.get('current'),
-                        }
-                        if save_worksheet_data(QQQ_DAILY_WS, qqq_daily_history):
-                            st.success(f"✅ 已保存 {data_date_str} 数据")
-                            st.cache_data.clear()
-                        else:
-                            st.error("保存失败")
-                    else:
-                        st.warning("缺少VR/GR/DR数据")
+            col_lead1, col_lead2, col_lead3 = st.columns(3)
+            with col_lead1:
+                dpi_delta = f"{dpi_change_t2:+.1f}%" if dpi_change_t2 is not None else None
+                st.metric("DPI", f"{today_dpi:.1f}%" if today_dpi else "N/A", delta=dpi_delta)
+            with col_lead2:
+                ne_delta = f"{ne_skew_change_t2:+.1f}%" if ne_skew_change_t2 is not None else None
+                st.metric("NE Skew", f"{today_ne_skew:.2f}%" if today_ne_skew else "N/A", delta=ne_delta)
+            with col_lead3:
+                st.metric("5Day DPI", f"{today_dpi_5d:.1f}%" if today_dpi_5d else "N/A")
             
-            # 计算变化量
-            vr_change = None
-            gr_change = None
-            dr_change = None
-            prev_date = None
+            # 显示过去3天的先行指标数值
+            if qqq_csv_df is not None and len(qqq_csv_df) >= 3:
+                with st.expander("📈 先行指标历史 (过去3天)", expanded=False):
+                    hist_rows = []
+                    for i in range(-3, 0):
+                        if len(qqq_csv_df) >= abs(i):
+                            row = qqq_csv_df.iloc[i]
+                            date_val = row.get('Date', f'T{i}')
+                            
+                            dpi_val = parse_number_safe(str(row.get('DPI', '')))
+                            if dpi_val is not None and dpi_val <= 1:
+                                dpi_val = dpi_val * 100
+                            
+                            ne_val = parse_number_safe(str(row.get('NE Skew', '')).replace('%', ''))
+                            if ne_val is not None and abs(ne_val) <= 1:
+                                ne_val = ne_val * 100
+                            
+                            dpi5_val = parse_number_safe(str(row.get('5Day DPI', '')).replace('%', ''))
+                            if dpi5_val is not None and dpi5_val <= 1:
+                                dpi5_val = dpi5_val * 100
+                            
+                            hist_rows.append({
+                                '日期': date_val,
+                                'DPI': f"{dpi_val:.1f}%" if dpi_val else "N/A",
+                                'NE Skew': f"{ne_val:.2f}%" if ne_val else "N/A",
+                                '5Day DPI': f"{dpi5_val:.1f}%" if dpi5_val else "N/A"
+                            })
+                    
+                    if hist_rows:
+                        st.dataframe(pd.DataFrame(hist_rows), hide_index=True, use_container_width=True)
             
-            if qqq_daily_history:
-                # 获取前一天数据
-                sorted_dates = sorted([d for d in qqq_daily_history.keys() if d < data_date_str], reverse=True)
-                if sorted_dates:
-                    prev_date = sorted_dates[0]
-                    prev_data = qqq_daily_history[prev_date]
-                    
-                    prev_vr = prev_data.get('vr')
-                    prev_gr = prev_data.get('gr')
-                    prev_dr = prev_data.get('dr')
-                    
-                    if today_vr and prev_vr:
-                        vr_change = today_vr - prev_vr
-                    if today_gr and prev_gr:
-                        gr_change = today_gr - prev_gr
-                    if today_dr and prev_dr:
-                        dr_change = today_dr - prev_dr
-            
-            # 显示变化量
-            if vr_change is not None:
-                st.info(f"📊 对比 {prev_date} → {data_date_str}")
-                
-                col_chg1, col_chg2, col_chg3 = st.columns(3)
-                with col_chg1:
-                    vr_color = "🔴" if vr_change < -0.1 else ("🟢" if vr_change > 0.1 else "⚪")
-                    vr_arrow = "↓" if vr_change < 0 else "↑"
-                    st.metric("VR变化", f"{vr_arrow} {vr_change:+.2f}", delta=f"{vr_color}")
-                with col_chg2:
-                    gr_color = "🔴" if gr_change > 0.1 else ("🟢" if gr_change < -0.1 else "⚪")
-                    gr_arrow = "↑" if gr_change > 0 else "↓"
-                    st.metric("GR变化", f"{gr_arrow} {gr_change:+.2f}", delta=f"{gr_color}")
-                with col_chg3:
-                    dr_color = "🟢" if dr_change > 0.1 else ("🔴" if dr_change < -0.1 else "⚪")
-                    dr_arrow = "↑" if dr_change > 0 else "↓"
-                    st.metric("DR变化", f"{dr_arrow} {dr_change:+.2f}", delta=f"{dr_color}")
-                
-                # 判断Gamma环境
-                current_price = qqq.get('current')
-                gamma_env = 'positive'  # 默认
-                if current_price and today_hw:
-                    if current_price > today_hw:
-                        gamma_env = 'positive'
-                        st.success(f"**Gamma环境**: 🟢 正Gamma (价格 {current_price:.2f} > Zero Gamma {today_hw:.0f}) - 做空优势")
-                    else:
-                        gamma_env = 'negative'
-                        st.error(f"**Gamma环境**: 🔴 负Gamma (价格 {current_price:.2f} < Zero Gamma {today_hw:.0f}) - 做多优势")
-                
-                # 匹配组合信号
-                combo_signals = match_combo_signals(gamma_env, vr_change, gr_change, dr_change)
-                
-                if combo_signals:
-                    st.markdown("### 🎯 匹配的组合信号")
-                    
-                    for sig in combo_signals:
-                        sig_color = "#00cc66" if sig['direction'] == 'bullish' else "#ff4b4b"
-                        sig_icon = "🚀" if sig['direction'] == 'bullish' else "💀"
-                        
-                        st.markdown(f"""
-                        <div style="border-left: 4px solid {sig_color}; padding: 10px; margin: 10px 0; background-color: rgba(0,0,0,0.05);">
-                        <h4>{sig_icon} {sig['name']} - {sig['direction_cn']} (准确率 {sig['accuracy']}%)</h4>
-                        <p><b>条件</b>: {sig['conditions']}</p>
-                        <p><b>MM逻辑</b>: {sig['mm_logic']}</p>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    
-                    # 获取QQQ技术面确认
-                    st.markdown("### 📈 技术面确认 (WT + RSI)")
-                    try:
-                        ticker = yf.Ticker("QQQ")
-                        hist = ticker.history(period="3mo")
-                        if not hist.empty:
-                            # 计算WaveTrend
-                            hlc3 = (hist['High'] + hist['Low'] + hist['Close']) / 3
-                            esa = hlc3.ewm(span=10).mean()
-                            d = (hlc3 - esa).abs().ewm(span=10).mean()
-                            ci = (hlc3 - esa) / (0.015 * d)
-                            wt1 = ci.ewm(span=21).mean()
-                            wt2 = wt1.rolling(4).mean()
-                            
-                            # RSI
-                            delta = hist['Close'].diff()
-                            gain = delta.where(delta > 0, 0).rolling(14).mean()
-                            loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-                            rs = gain / loss
-                            rsi = 100 - (100 / (1 + rs))
-                            
-                            latest_wt1 = float(wt1.iloc[-1])
-                            latest_rsi = float(rsi.iloc[-1])
-                            wt_dir = '↑' if wt1.iloc[-1] > wt1.iloc[-2] else '↓'
-                            
-                            col_tech1, col_tech2, col_tech3 = st.columns(3)
-                            with col_tech1:
-                                wt_status = "超卖" if latest_wt1 <= -60 else ("超买" if latest_wt1 >= 60 else "中性")
-                                st.metric("WaveTrend", f"{latest_wt1:.1f} ({wt_status})")
-                            with col_tech2:
-                                st.metric("WT方向", f"{wt_dir}")
-                            with col_tech3:
-                                rsi_status = "超卖" if latest_rsi < 30 else ("超买" if latest_rsi > 70 else "中性")
-                                st.metric("RSI", f"{latest_rsi:.0f} ({rsi_status})")
-                            
-                            # 技术确认
-                            for sig in combo_signals:
-                                tech_confirm = get_tech_confirmation_for_signal(
-                                    sig['direction'], latest_wt1, wt_dir, latest_rsi
-                                )
-                                if tech_confirm['conflict']:
-                                    st.warning(f"⚠️ {sig['name']} 技术面冲突: {tech_confirm['reason']}")
-                                elif '✅' in tech_confirm['status']:
-                                    st.success(f"✅ {sig['name']} 技术确认: {tech_confirm['reason']}")
-                                else:
-                                    st.info(f"➖ {sig['name']} 待确认: {tech_confirm['reason']}")
-                    except Exception as e:
-                        st.warning(f"获取技术指标失败: {e}")
-                
+            # 判断Gamma环境
+            current_price = qqq.get('current')
+            gamma_env = 'positive'
+            if current_price and today_hw:
+                if current_price > today_hw:
+                    gamma_env = 'positive'
+                    st.success(f"**Gamma环境**: 🟢 正Gamma (价格 {current_price:.2f} > Zero Gamma {today_hw:.0f}) - 做空优势")
                 else:
-                    st.info("📊 当前无匹配的组合信号，等待条件满足")
+                    gamma_env = 'negative'
+                    st.error(f"**Gamma环境**: 🔴 负Gamma (价格 {current_price:.2f} < Zero Gamma {today_hw:.0f}) - 做多优势")
+            
+            # 匹配组合信号
+            combo_signals = []
+            if vr_change is not None or gr_change is not None or dr_change is not None:
+                combo_signals = match_combo_signals(gamma_env, vr_change, gr_change, dr_change)
+            
+            if combo_signals:
+                st.markdown("### 🎯 匹配的组合信号")
+                
+                for sig in combo_signals:
+                    sig_color = "#00cc66" if sig['direction'] == 'bullish' else "#ff4b4b"
+                    sig_icon = "🚀" if sig['direction'] == 'bullish' else "💀"
                     
-                    # 显示当前状态
+                    st.markdown(f"""
+                    <div style="border-left: 4px solid {sig_color}; padding: 10px; margin: 10px 0; background-color: rgba(0,0,0,0.05);">
+                    <h4>{sig_icon} {sig['name']} - {sig['direction_cn']} (准确率 {sig['accuracy']}%)</h4>
+                    <p><b>条件</b>: {sig['conditions']}</p>
+                    <p><b>MM逻辑</b>: {sig['mm_logic']}</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                # 获取QQQ技术面确认
+                st.markdown("### 📈 技术面确认 (WT + RSI)")
+                try:
+                    ticker = yf.Ticker("QQQ")
+                    hist = ticker.history(period="3mo")
+                    if not hist.empty:
+                        # 计算WaveTrend
+                        hlc3 = (hist['High'] + hist['Low'] + hist['Close']) / 3
+                        esa = hlc3.ewm(span=10).mean()
+                        d = (hlc3 - esa).abs().ewm(span=10).mean()
+                        ci = (hlc3 - esa) / (0.015 * d)
+                        wt1 = ci.ewm(span=21).mean()
+                        wt2 = wt1.rolling(4).mean()
+                        
+                        # RSI
+                        delta = hist['Close'].diff()
+                        gain = delta.where(delta > 0, 0).rolling(14).mean()
+                        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+                        rs = gain / loss
+                        rsi = 100 - (100 / (1 + rs))
+                        
+                        latest_wt1 = float(wt1.iloc[-1])
+                        latest_rsi = float(rsi.iloc[-1])
+                        wt_dir = '↑' if wt1.iloc[-1] > wt1.iloc[-2] else '↓'
+                        
+                        col_tech1, col_tech2, col_tech3 = st.columns(3)
+                        with col_tech1:
+                            wt_status = "超卖" if latest_wt1 <= -60 else ("超买" if latest_wt1 >= 60 else "中性")
+                            st.metric("WaveTrend", f"{latest_wt1:.1f} ({wt_status})")
+                        with col_tech2:
+                            st.metric("WT方向", f"{wt_dir}")
+                        with col_tech3:
+                            rsi_status = "超卖" if latest_rsi < 30 else ("超买" if latest_rsi > 70 else "中性")
+                            st.metric("RSI", f"{latest_rsi:.0f} ({rsi_status})")
+                        
+                        # 技术确认
+                        for sig in combo_signals:
+                            tech_confirm = get_tech_confirmation_for_signal(
+                                sig['direction'], latest_wt1, wt_dir, latest_rsi
+                            )
+                            if tech_confirm['conflict']:
+                                st.warning(f"⚠️ {sig['name']} 技术面冲突: {tech_confirm['reason']}")
+                            elif '✅' in tech_confirm['status']:
+                                st.success(f"✅ {sig['name']} 技术确认: {tech_confirm['reason']}")
+                            else:
+                                st.info(f"➖ {sig['name']} 待确认: {tech_confirm['reason']}")
+                except Exception as e:
+                    st.warning(f"获取技术指标失败: {e}")
+            
+            else:
+                # 无组合信号时显示当前状态
+                st.info("📊 当前无匹配的组合信号")
+                
+                # 显示当前VR/GR/DR状态
+                if vr_change is not None:
                     st.markdown("**当前指标状态:**")
                     status_items = []
                     if vr_change < -0.1:
-                        status_items.append("VR↓ (满足做空条件)")
+                        status_items.append("✅ VR↓ (满足做空条件)")
                     elif vr_change > 0.1:
-                        status_items.append("VR↑ (满足做多条件)")
+                        status_items.append("✅ VR↑ (满足做多条件)")
                     else:
-                        status_items.append("VR变化不足")
+                        status_items.append(f"⚪ VR变化 {vr_change:+.2f} (阈值±0.1)")
                     
-                    if gr_change > 0.05:
-                        status_items.append("GR↑ (Put Gamma增加)")
-                    elif gr_change < -0.05:
-                        status_items.append("GR↓ (Call Gamma增加)")
-                    else:
-                        status_items.append("GR变化不足")
+                    if gr_change is not None:
+                        if gr_change > 0.05:
+                            status_items.append("✅ GR↑ (Put Gamma增加)")
+                        elif gr_change < -0.05:
+                            status_items.append("✅ GR↓ (Call Gamma增加)")
+                        else:
+                            status_items.append(f"⚪ GR变化 {gr_change:+.2f} (阈值±0.05)")
                     
-                    if dr_change < -0.1:
-                        status_items.append("DR↓ (Put Delta增加)")
-                    elif dr_change > 0.1:
-                        status_items.append("DR↑ (Call Delta增加)")
-                    else:
-                        status_items.append("DR变化不足")
+                    if dr_change is not None:
+                        if dr_change < -0.1:
+                            status_items.append("✅ DR↓ (Put Delta增加)")
+                        elif dr_change > 0.1:
+                            status_items.append("✅ DR↑ (Call Delta增加)")
+                        else:
+                            status_items.append(f"⚪ DR变化 {dr_change:+.2f} (阈值±0.1)")
                     
                     for item in status_items:
                         st.markdown(f"• {item}")
-            
-            else:
-                st.warning("⚠️ 需要保存至少2天数据才能计算变化量，请先保存今日VR/GR/DR数据")
-            
-            # ===== 先行指标提醒 =====
-            if csv_data:
-                leading = get_leading_indicators(csv_data)
-                if leading['predictions']:
-                    st.markdown("### ⏰ 先行指标提醒 (T+2/T+3)")
-                    for pred in leading['predictions']:
-                        if pred['direction'] == 'bearish':
-                            st.warning(f"**{pred['indicator']}**: {pred['value']} → {pred['prediction']} (准确率 {pred['accuracy']}%)")
-                        else:
-                            st.success(f"**{pred['indicator']}**: {pred['value']} → {pred['prediction']} (准确率 {pred['accuracy']}%)")
+                    
+                    st.caption("💡 需要VR+GR或VR+DR组合满足条件才能产生信号")
             
             st.divider()
             
@@ -3602,70 +3635,121 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                 
                 st.divider()
             
-            # ===== 详细操作建议 =====
+            # ===== 详细操作建议（根据组合信号） =====
             st.subheader("📋 详细操作建议")
             
             gamma_env_type = analysis.get('nq', {}).get('gamma_env_type') or analysis.get('qqq', {}).get('gamma_env_type')
-            qqq = analysis.get('qqq', {})
+            qqq_analysis = analysis.get('qqq', {})
             
-            if gamma_env_type == 'positive':
-                cw = qqq.get('call_wall')
-                pw = qqq.get('put_wall')
-                zg = qqq.get('zero_gamma')
-                vt = qqq.get('vol_trigger')
+            cw = qqq_analysis.get('call_wall')
+            pw = qqq_analysis.get('put_wall')
+            zg = qqq_analysis.get('zero_gamma')
+            vt = qqq_analysis.get('vol_trigger')
+            current = qqq_analysis.get('current')
+            
+            # 格式化数值
+            zg_str = f"{zg:.0f}" if zg else 'N/A'
+            pw_str = f"{pw:.0f}" if pw else 'N/A'
+            cw_str = f"{cw:.0f}" if cw else 'N/A'
+            vt_str = f"{vt:.0f}" if vt else 'N/A'
+            
+            # 根据组合信号产生建议
+            if combo_signals:
+                # 有组合信号时，根据信号方向给出建议
+                signal_direction = combo_signals[0]['direction']  # 取第一个（最强）信号
+                signal_name = combo_signals[0]['name']
                 
-                # 格式化数值
-                zg_str = f"{zg:.0f}" if zg else 'N/A'
-                pw_str = f"{pw:.0f}" if pw else 'N/A'
-                cw_str = f"{cw:.0f}" if cw else 'N/A'
-                vt_str = f"{vt:.0f}" if vt else 'N/A'
-                
-                advice = f"""
-                **正Gamma环境 - 均值回归策略**
-                
-                🎯 **做多区域**: 
-                - Zero Gamma ({zg_str}) 附近是最佳做多位置
-                - Put Wall ({pw_str}) 是强支撑，可加仓
-                
-                🎯 **减仓/做空区域**:
-                - Call Wall ({cw_str}) 附近减仓或轻仓做空
-                - 不追Call Wall突破！正Gamma会压制涨幅
-                
-                ⚠️ **风险控制**:
-                - 止损设在Zero Gamma下方2-3点
-                - 如果跌破Zero Gamma，观望等待企稳
-                - 如果价格跌破Volatility Trigger ({vt_str})，环境可能转为负Gamma
-                """
-                st.success(advice)
-            elif gamma_env_type == 'negative':
-                cw = qqq.get('call_wall')
-                pw = qqq.get('put_wall')
-                zg = qqq.get('zero_gamma')
-                
-                # 格式化数值
-                zg_str = f"{zg:.0f}" if zg else 'N/A'
-                pw_str = f"{pw:.0f}" if pw else 'N/A'
-                cw_str = f"{cw:.0f}" if cw else 'N/A'
-                
-                advice = f"""
-                **负Gamma环境 - 趋势跟随策略**
-                
-                ⚡ **趋势特征**:
-                - 波动放大，趋势延续性强
-                - Call Wall突破会加速上涨
-                - Put Wall跌破会加速下跌
-                
-                🎯 **操作建议**:
-                - 顺势操作，不抄底不摸顶
-                - 突破Call Wall ({cw_str}) 可追多
-                - 跌破Put Wall ({pw_str}) 可追空
-                
-                ⚠️ **风险控制**:
-                - 严格止损，波动可能很大
-                - 减小仓位，负Gamma环境风险高
-                - Zero Gamma ({zg_str}) 是关键分界线
-                """
-                st.error(advice)
+                if signal_direction == 'bearish':
+                    # 做空信号
+                    advice = f"""
+                    **🎯 {signal_name} - 做空信号确认**
+                    
+                    📉 **操作方向**: 做空 QQQ/NQ
+                    
+                    **入场策略**:
+                    - 在当前价位 ({current:.2f}) 或反弹至 Call Wall ({cw_str}) 附近做空
+                    - 正Gamma环境下Call Wall是阻力，不易突破
+                    
+                    **目标位**:
+                    - 第一目标: Zero Gamma ({zg_str})
+                    - 第二目标: Put Wall ({pw_str})
+                    
+                    **止损位**:
+                    - 止损: Call Wall上方 3-5点 ({float(cw)+5:.0f} 附近)
+                    - 若突破Call Wall并站稳15分钟，止损离场
+                    
+                    ⚠️ **风险提示**:
+                    - 关注开盘30分钟走势确认
+                    - 若跌破Zero Gamma进入负Gamma，可能加速下跌
+                    """
+                    st.error(advice)
+                    
+                else:
+                    # 做多信号
+                    advice = f"""
+                    **🎯 {signal_name} - 做多信号确认**
+                    
+                    📈 **操作方向**: 做多 QQQ/NQ
+                    
+                    **入场策略**:
+                    - 在当前价位 ({current:.2f}) 或回调至 Zero Gamma ({zg_str}) 附近做多
+                    - 负Gamma环境下趋势延续性强
+                    
+                    **目标位**:
+                    - 第一目标: Call Wall ({cw_str})
+                    - 负Gamma下突破Call Wall可能加速上涨
+                    
+                    **止损位**:
+                    - 止损: Zero Gamma下方 3-5点 ({float(zg)-5:.0f} 附近)
+                    - 若跌破Put Wall ({pw_str})，止损离场
+                    
+                    ⚠️ **风险提示**:
+                    - 关注开盘30分钟走势确认
+                    - 负Gamma波动大，控制仓位
+                    """
+                    st.success(advice)
+            
+            else:
+                # 无组合信号时，根据Gamma环境给出一般建议
+                if gamma_env_type == 'positive':
+                    advice = f"""
+                    **正Gamma环境 - 区间震荡策略**
+                    
+                    📊 **当前无明确信号，建议观望或区间操作**
+                    
+                    🎯 **做多区域**: 
+                    - Zero Gamma ({zg_str}) 附近是最佳做多位置
+                    - Put Wall ({pw_str}) 是强支撑
+                    
+                    🎯 **做空区域**:
+                    - Call Wall ({cw_str}) 附近可轻仓做空
+                    - 不追Call Wall突破
+                    
+                    ⚠️ **等待信号**:
+                    - VR下降>0.1 + GR上升>0.05 → 做空信号
+                    - VR上升>0.1 + GR下降>0.05 → 做多信号
+                    """
+                    st.info(advice)
+                else:
+                    advice = f"""
+                    **负Gamma环境 - 等待趋势确认**
+                    
+                    📊 **当前无明确信号，建议等待**
+                    
+                    ⚡ **环境特征**:
+                    - 负Gamma波动放大
+                    - 突破关键位可能加速
+                    
+                    🎯 **等待的信号**:
+                    - VR上升>0.1 + GR下降 → 做多信号
+                    - 突破Call Wall ({cw_str}) 可追多
+                    - 跌破Put Wall ({pw_str}) 可追空
+                    
+                    ⚠️ **风险控制**:
+                    - 无信号时减小仓位
+                    - 严格止损
+                    """
+                    st.warning(advice)
             
             st.divider()
             
@@ -3680,14 +3764,14 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
             col1, col2, col3 = st.columns([1,1,2])
             with col1:
                 if st.button("💾 保存今日数据", key="save_qqq_history"):
-                    if qqq.get('call_wall') and qqq.get('put_wall'):
+                    if qqq_analysis.get('call_wall') and qqq_analysis.get('put_wall'):
                         qqq_history[today_str] = {
                             'date': today_str,
-                            'call_wall': qqq.get('call_wall'),
-                            'put_wall': qqq.get('put_wall'),
-                            'zero_gamma': qqq.get('zero_gamma'),
-                            'vol_trigger': qqq.get('vol_trigger'),
-                            'current_price': qqq.get('current'),
+                            'call_wall': qqq_analysis.get('call_wall'),
+                            'put_wall': qqq_analysis.get('put_wall'),
+                            'zero_gamma': qqq_analysis.get('zero_gamma'),
+                            'vol_trigger': qqq_analysis.get('vol_trigger'),
+                            'current_price': qqq_analysis.get('current'),
                             'gamma_env': gamma_env_type
                         }
                         save_worksheet_data("QQQ_History", qqq_history)
@@ -7775,15 +7859,39 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                     if has_prev:
                         st.info(f"📅 对比: {prev_date} → {data_date_str}")
                         
-                        # 获取前一天各股票数据
+                        # 获取前一天各股票数据 (T-1)
                         prev_data_dict = {}
                         for k, v in elite_history.items():
                             if v.get('date') == prev_date:
                                 prev_data_dict[v.get('symbol')] = v
                         
-                        # 获取前几天DPI数据（用于计算DPI变化）
-                        prev_dpi_dict = {}  # symbol -> [prev1_dpi, prev2_dpi, ...]
-                        sorted_hist_dates = sorted(set([v.get('date') for v in elite_history.values() if v.get('date') and v.get('date') < data_date_str]), reverse=True)[:5]
+                        # 获取前两天数据 (T-2) 用于DPI和NE Skew变化计算
+                        prev2_date = prev_dates[1] if len(prev_dates) > 1 else None
+                        prev2_data_dict = {}
+                        if prev2_date:
+                            for k, v in elite_history.items():
+                                if v.get('date') == prev2_date:
+                                    prev2_data_dict[v.get('symbol')] = v
+                        
+                        # 获取过去3天的先行指标历史（用于显示）
+                        indicator_history_dict = {}  # symbol -> [{date, dpi, dpi_5d, ne_skew}, ...]
+                        sorted_hist_dates = sorted(set([v.get('date') for v in elite_history.values() if v.get('date') and v.get('date') < data_date_str]), reverse=True)[:3]
+                        
+                        for symbol in ELITE_20:
+                            indicator_history_dict[symbol] = []
+                            for d in sorted_hist_dates:
+                                for k, v in elite_history.items():
+                                    if v.get('date') == d and v.get('symbol') == symbol:
+                                        indicator_history_dict[symbol].append({
+                                            '日期': d[-5:],  # 只显示MM-DD
+                                            'DPI': f"{v.get('dpi'):.1f}%" if v.get('dpi') else "N/A",
+                                            '5Day DPI': f"{v.get('dpi_5d'):.1f}%" if v.get('dpi_5d') else "N/A",
+                                            'NE Skew': f"{v.get('ne_skew'):.2f}%" if v.get('ne_skew') else "N/A"
+                                        })
+                                        break
+                        
+                        # 兼容旧数据结构
+                        prev_dpi_dict = {}
                         for symbol in ELITE_20:
                             prev_dpi_dict[symbol] = []
                             for d in sorted_hist_dates:
@@ -7799,7 +7907,7 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                         for _, row in today_data.iterrows():
                             symbol = row['symbol']
                             
-                            # 当前数据
+                            # 当前数据 (T)
                             price = row['price']
                             hw = row['hw']
                             cw = row['cw']
@@ -7811,18 +7919,26 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                             dpi_5d = row['dpi_5d']
                             ne_skew = row['ne_skew']
                             
-                            # 前一天数据
+                            # 前一天数据 (T-1)
                             prev = prev_data_dict.get(symbol, {})
                             prev_dr = prev.get('dr')
                             prev_gr = prev.get('gr')
                             prev_vr = prev.get('vr')
                             prev_dpi = prev.get('dpi')
                             
-                            # 计算变化
+                            # 前两天数据 (T-2) 用于先行指标变化
+                            prev2 = prev2_data_dict.get(symbol, {})
+                            prev2_dpi = prev2.get('dpi')
+                            prev2_ne_skew = prev2.get('ne_skew')
+                            
+                            # 计算VR/GR/DR变化 (T vs T-1)
                             dr_chg = (dr - prev_dr) if (dr is not None and prev_dr is not None) else None
                             gr_chg = (gr - prev_gr) if (gr is not None and prev_gr is not None) else None
                             vr_chg = (vr - prev_vr) if (vr is not None and prev_vr is not None) else None
-                            dpi_chg = (dpi - prev_dpi) if (dpi is not None and prev_dpi is not None) else None
+                            
+                            # 计算先行指标变化 (T vs T-2)
+                            dpi_chg = (dpi - prev2_dpi) if (dpi is not None and prev2_dpi is not None) else None
+                            ne_skew_chg = (ne_skew - prev2_ne_skew) if (ne_skew is not None and prev2_ne_skew is not None) else None
                             
                             # 判断Gamma环境 (个股用Hedge Wall)
                             gamma_env = 'positive'
@@ -7851,16 +7967,18 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                 'VR_Chg': vr_chg,
                                 'DPI': dpi,
                                 'DPI_Vol_Pct': row.get('dpi_vol_pct'),
-                                'DPI_Chg': dpi_chg,
+                                'DPI_Chg': dpi_chg,  # T vs T-2
                                 'DPI_5d': dpi_5d,
                                 'NE_Skew': ne_skew,
+                                'NE_Skew_Chg': ne_skew_chg,  # T vs T-2
                                 'WT1': tech.get('WT1') if tech else None,
                                 'WT_Dir': tech.get('WT_Dir') if tech else None,
                                 'WT_Status': tech.get('WT_Status') if tech else None,
                                 'RSI': tech.get('RSI') if tech else None,
                                 'Has_Signal': len(combo_sigs) > 0,
                                 'Signals': combo_sigs,
-                                'Prev_DPI_History': prev_dpi_dict.get(symbol, [])
+                                'Prev_DPI_History': prev_dpi_dict.get(symbol, []),
+                                'Indicator_History': indicator_history_dict.get(symbol, [])
                             }
                             
                             all_stocks_data.append(stock_info)
@@ -7935,6 +8053,36 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                         st.divider()
                         st.subheader(f"📋 20只精选股票详细数据")
                         
+                        # 盘前价格刷新按钮
+                        col_refresh1, col_refresh2 = st.columns([1, 3])
+                        with col_refresh1:
+                            refresh_premarket = st.button("🔄 刷新盘前价格", key="refresh_elite20_premarket")
+                        
+                        # 存储刷新后的价格
+                        premarket_prices = {}
+                        if refresh_premarket:
+                            with st.spinner("获取盘前价格..."):
+                                for stock in all_stocks_data:
+                                    symbol = stock['Symbol']
+                                    try:
+                                        ticker = yf.Ticker(symbol)
+                                        # 尝试获取盘前价格
+                                        info = ticker.info
+                                        pre_price = info.get('preMarketPrice') or info.get('regularMarketPrice')
+                                        if pre_price:
+                                            premarket_prices[symbol] = float(pre_price)
+                                    except:
+                                        pass
+                            
+                            if premarket_prices:
+                                st.success(f"✅ 已刷新 {len(premarket_prices)} 只股票的盘前价格")
+                        
+                        # 存储到session_state
+                        if 'elite20_premarket_prices' not in st.session_state:
+                            st.session_state.elite20_premarket_prices = {}
+                        if premarket_prices:
+                            st.session_state.elite20_premarket_prices = premarket_prices
+                        
                         # 筛选器
                         filter_option = st.radio(
                             "筛选",
@@ -7955,6 +8103,31 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                             symbol = stock['Symbol']
                             has_sig = stock['Has_Signal']
                             
+                            # 获取价格（优先使用盘前价格）
+                            csv_price = stock['Price']
+                            premarket_price = st.session_state.get('elite20_premarket_prices', {}).get(symbol)
+                            current_price = premarket_price if premarket_price else csv_price
+                            
+                            # 获取关键位
+                            hw = stock['HW']
+                            cw = stock['CW']
+                            pw = stock['PW']
+                            
+                            # 计算距离百分比
+                            dist_hw = ((current_price - hw) / hw * 100) if (current_price and hw) else None
+                            dist_cw = ((current_price - cw) / cw * 100) if (current_price and cw) else None
+                            dist_pw = ((current_price - pw) / pw * 100) if (current_price and pw) else None
+                            
+                            # 重新判断Gamma环境（基于当前价格）
+                            orig_gamma_env = stock['Gamma_Env']
+                            new_gamma_env = orig_gamma_env
+                            gamma_changed = False
+                            
+                            if current_price and hw:
+                                new_gamma_env = '正' if current_price > hw else '负'
+                                if premarket_price and new_gamma_env != orig_gamma_env:
+                                    gamma_changed = True
+                            
                             # 确定边框颜色
                             if has_sig:
                                 sigs = stock['Signals']
@@ -7967,26 +8140,39 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                 sig_icon = "➖"
                                 sig_text = "无组合信号"
                             
+                            # 如果Gamma环境发生变化，标记
+                            gamma_alert = ""
+                            if gamma_changed:
+                                gamma_alert = f" ⚠️ Gamma环境变更: {orig_gamma_env}→{new_gamma_env}"
+                            
                             with st.container():
                                 st.markdown(f"""
                                 <div style="border-left: 4px solid {border_color}; padding-left: 15px; margin: 10px 0; background-color: rgba(0,0,0,0.02);">
-                                <h4>{sig_icon} {symbol} - {stock['Gamma_Env']}Gamma | {sig_text}</h4>
+                                <h4>{sig_icon} {symbol} - {new_gamma_env}Gamma | {sig_text}{gamma_alert}</h4>
                                 </div>
                                 """, unsafe_allow_html=True)
                                 
-                                # 第一行：价格和关键位
-                                col1, col2, col3, col4, col5 = st.columns(5)
+                                # 第一行：价格和关键位距离
+                                col1, col2, col3, col4, col5, col6 = st.columns(6)
                                 with col1:
-                                    st.metric("价格", f"${stock['Price']:.2f}" if stock['Price'] else "N/A")
+                                    price_label = "盘前价" if premarket_price else "CSV价"
+                                    price_delta = f"{((premarket_price - csv_price) / csv_price * 100):+.2f}%" if (premarket_price and csv_price) else None
+                                    st.metric(price_label, f"${current_price:.2f}" if current_price else "N/A", delta=price_delta)
                                 with col2:
-                                    st.metric("Hedge Wall", f"${stock['HW']:.0f}" if stock['HW'] else "N/A")
+                                    hw_dist_str = f"{dist_hw:+.1f}%" if dist_hw is not None else "N/A"
+                                    st.metric("离HW", hw_dist_str, help=f"Hedge Wall: ${hw:.0f}" if hw else None)
                                 with col3:
-                                    st.metric("Call Wall", f"${stock['CW']:.0f}" if stock['CW'] else "N/A")
+                                    cw_dist_str = f"{dist_cw:+.1f}%" if dist_cw is not None else "N/A"
+                                    st.metric("离CW", cw_dist_str, help=f"Call Wall: ${cw:.0f}" if cw else None)
                                 with col4:
-                                    st.metric("Put Wall", f"${stock['PW']:.0f}" if stock['PW'] else "N/A")
+                                    pw_dist_str = f"{dist_pw:+.1f}%" if dist_pw is not None else "N/A"
+                                    st.metric("离PW", pw_dist_str, help=f"Put Wall: ${pw:.0f}" if pw else None)
                                 with col5:
-                                    gamma_color = "🟢" if stock['Gamma_Env'] == '正' else "🔴"
-                                    st.metric("Gamma环境", f"{gamma_color} {stock['Gamma_Env']}")
+                                    gamma_color = "🟢" if new_gamma_env == '正' else "🔴"
+                                    st.metric("Gamma", f"{gamma_color} {new_gamma_env}")
+                                with col6:
+                                    # 显示关键位
+                                    st.caption(f"HW:{hw:.0f} CW:{cw:.0f} PW:{pw:.0f}" if (hw and cw and pw) else "")
                                 
                                 # 第二行：VR/GR/DR及其变化
                                 col1, col2, col3, col4, col5, col6 = st.columns(6)
@@ -8036,10 +8222,17 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                     
                                     with col4:
                                         ne_val = f"{stock['NE_Skew']:.2f}%" if stock['NE_Skew'] else "N/A"
-                                        st.metric("NE Skew", ne_val)
+                                        ne_chg = stock.get('NE_Skew_Chg')
+                                        ne_delta = f"{ne_chg:+.2f}%" if ne_chg else ""
+                                        st.metric("NE Skew", ne_val, delta=ne_delta)
                                     
-                                    # DPI历史变化
-                                    if stock['Prev_DPI_History']:
+                                    # 过去3天先行指标历史表格
+                                    if stock.get('Indicator_History'):
+                                        st.markdown("**过去3天先行指标变化:**")
+                                        hist_df = pd.DataFrame(stock['Indicator_History'])
+                                        st.dataframe(hist_df, hide_index=True, use_container_width=True)
+                                    elif stock['Prev_DPI_History']:
+                                        # 兼容旧数据结构
                                         dpi_hist_str = " → ".join([f"{h['date'][-5:]}: {h['dpi']:.1f}%" for h in stock['Prev_DPI_History'][:3] if h.get('dpi')])
                                         if dpi_hist_str:
                                             st.caption(f"DPI历史: {dpi_hist_str}")
