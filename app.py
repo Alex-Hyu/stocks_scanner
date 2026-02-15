@@ -3269,24 +3269,27 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
             try:
                 qqq_csv_df = pd.read_csv(qqq_csv_file)
                 if not qqq_csv_df.empty:
-                    # 按日期排序（假设有Date列，否则按行顺序）
+                    # 必须按Date列降序排序，确保最新日期在最前面
                     if 'Date' in qqq_csv_df.columns:
-                        qqq_csv_df = qqq_csv_df.sort_values('Date')
-                    
-                    # 取最新几行
-                    if len(qqq_csv_df) >= 1:
-                        csv_data = qqq_csv_df.iloc[-1].to_dict()  # T (最新)
-                    if len(qqq_csv_df) >= 2:
-                        csv_data_prev = qqq_csv_df.iloc[-2].to_dict()  # T-1
-                    if len(qqq_csv_df) >= 3:
-                        csv_data_prev2 = qqq_csv_df.iloc[-3].to_dict()  # T-2
-                    
-                    st.success(f"✅ 已加载QQQ CSV数据: {len(qqq_csv_df)} 天")
-                    
-                    # 显示日期范围
-                    if 'Date' in qqq_csv_df.columns:
-                        dates = qqq_csv_df['Date'].tolist()
-                        st.caption(f"日期范围: {dates[0]} ~ {dates[-1]}")
+                        qqq_csv_df['Date'] = pd.to_datetime(qqq_csv_df['Date'])
+                        qqq_csv_df = qqq_csv_df.sort_values('Date', ascending=False).reset_index(drop=True)
+                        
+                        # T = 第0行（最新日期），T-1 = 第1行，T-2 = 第2行
+                        if len(qqq_csv_df) >= 1:
+                            csv_data = qqq_csv_df.iloc[0].to_dict()  # T (最新)
+                        if len(qqq_csv_df) >= 2:
+                            csv_data_prev = qqq_csv_df.iloc[1].to_dict()  # T-1
+                        if len(qqq_csv_df) >= 3:
+                            csv_data_prev2 = qqq_csv_df.iloc[2].to_dict()  # T-2
+                        
+                        # 显示读取的日期
+                        t_date = qqq_csv_df.iloc[0]['Date'].strftime('%Y-%m-%d') if len(qqq_csv_df) >= 1 else 'N/A'
+                        t1_date = qqq_csv_df.iloc[1]['Date'].strftime('%Y-%m-%d') if len(qqq_csv_df) >= 2 else 'N/A'
+                        t2_date = qqq_csv_df.iloc[2]['Date'].strftime('%Y-%m-%d') if len(qqq_csv_df) >= 3 else 'N/A'
+                        
+                        st.success(f"✅ 已加载QQQ CSV: T={t_date}, T-1={t1_date}, T-2={t2_date}")
+                    else:
+                        st.warning("⚠️ CSV缺少Date列，无法确定日期顺序")
             except Exception as e:
                 st.warning(f"⚠️ CSV读取失败: {e}")
         
@@ -3401,8 +3404,14 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                     if ne_val is not None:
                         today_ne_skew = ne_val * 100 if abs(ne_val) <= 1 else ne_val
                 
-                # 5Day DPI
-                dpi_5d_raw = csv_data.get('5Day DPI') or csv_data.get('5 day DPI')
+                # 5Day DPI - 尝试多种列名
+                dpi_5d_raw = (csv_data.get('5Day DPI') or 
+                              csv_data.get('5 day DPI') or 
+                              csv_data.get('5d DPI') or
+                              csv_data.get('5 Day DPI') or
+                              csv_data.get('5day DPI') or
+                              csv_data.get('5d % DPI Volume') or
+                              csv_data.get('5 day % DPI Volume'))
                 today_dpi_5d = parse_number_safe(str(dpi_5d_raw).replace('%', '')) if dpi_5d_raw else None
                 if today_dpi_5d is not None and today_dpi_5d <= 1:
                     today_dpi_5d = today_dpi_5d * 100
@@ -7752,7 +7761,7 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
         
         # ========== 数据上传 ==========
         st.subheader("📤 上传今日数据")
-        st.caption("上传5000+股票CSV，自动提取20只精选股票数据")
+        st.caption("上传5000+股票CSV，自动提取20只精选股票数据。文件名含日期（如xxx_2026-02-13.csv）将自动保存")
         
         elite_file = st.file_uploader(
             "上传期权数据CSV（SpotGamma Equity Hub）",
@@ -7760,7 +7769,39 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
             key='elite20_upload'
         )
         
-        data_date_elite = st.date_input("数据日期", value=datetime.now().date(), key="elite20_date")
+        # 从文件名提取日期
+        auto_date = None
+        if elite_file:
+            filename = elite_file.name
+            # 尝试匹配日期格式：2026-02-13, 2026_02_13, 20260213
+            import re
+            date_patterns = [
+                r'(\d{4}-\d{2}-\d{2})',  # 2026-02-13
+                r'(\d{4}_\d{2}_\d{2})',  # 2026_02_13
+                r'(\d{8})',               # 20260213
+            ]
+            for pattern in date_patterns:
+                match = re.search(pattern, filename)
+                if match:
+                    date_str = match.group(1)
+                    try:
+                        if '-' in date_str:
+                            auto_date = datetime.strptime(date_str, '%Y-%m-%d').date()
+                        elif '_' in date_str:
+                            auto_date = datetime.strptime(date_str, '%Y_%m_%d').date()
+                        else:
+                            auto_date = datetime.strptime(date_str, '%Y%m%d').date()
+                        break
+                    except:
+                        pass
+        
+        # 如果从文件名提取到日期，使用它；否则用手动输入
+        if auto_date:
+            data_date_elite = auto_date
+            st.info(f"📅 从文件名识别日期: {data_date_elite}")
+        else:
+            data_date_elite = st.date_input("数据日期（未从文件名识别到）", value=datetime.now().date(), key="elite20_date")
+        
         data_date_str = data_date_elite.strftime('%Y-%m-%d')
         
         # 加载历史数据
@@ -7858,6 +7899,22 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                         })
                     
                     today_data = pd.DataFrame(parsed_data)
+                    
+                    # ========== 自动保存到云端（如果该日期数据不存在） ==========
+                    date_exists = any(v.get('date') == data_date_str for v in elite_history.values())
+                    if not date_exists and auto_date:
+                        # 从文件名识别日期且该日期数据不存在，自动保存
+                        for _, row in today_data.iterrows():
+                            key = f"{data_date_str}_{row['symbol']}"
+                            elite_history[key] = row.to_dict()
+                        
+                        if save_worksheet_data(ELITE20_DAILY_WS, elite_history):
+                            st.success(f"✅ 已自动保存 {data_date_str} 数据 ({len(today_data)} 条)")
+                            st.cache_data.clear()
+                        else:
+                            st.warning("⚠️ 自动保存失败")
+                    elif date_exists:
+                        st.info(f"📋 {data_date_str} 数据已存在，如需更新请手动保存")
                     
                     # ========== 计算变化量 ==========
                     st.subheader("📊 VR/GR/DR变化分析")
