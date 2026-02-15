@@ -1681,14 +1681,18 @@ def get_leading_indicators(csv_data):
         return indicators
     
     # NE Skew (Next Expiration Skew)
+    # 数据格式可能是 "-13.87%" 或 -0.1387 或 -13.87
     ne_skew = csv_data.get('NE Skew') or csv_data.get('Next Exp Skew')
     if ne_skew is not None:
-        ne_val = parse_number_safe(str(ne_skew).replace('%', ''))
+        ne_str = str(ne_skew).replace('%', '').strip()
+        ne_val = parse_number_safe(ne_str)
         if ne_val is not None:
-            if ne_val > 1:
-                ne_val = ne_val  # 已经是百分比
-            else:
+            # 判断是否已经是百分比格式
+            # 如果绝对值>1，说明已经是百分比（如-13.87）
+            # 如果绝对值<=1，说明是小数（如-0.1387），需要*100
+            if abs(ne_val) <= 1:
                 ne_val = ne_val * 100  # 转换为百分比
+            # 否则保持原值（已经是百分比）
             
             indicators['ne_skew'] = ne_val
             
@@ -3713,14 +3717,46 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                 
                 history_df = pd.DataFrame(history_rows)
                 history_df['日期'] = pd.to_datetime(history_df['日期'])
-                history_df = history_df.set_index('日期')
                 
-                # 绘制图表
-                st.line_chart(history_df[['Call Wall', 'Put Wall', 'Zero Gamma', 'Vol Trigger']])
+                # 使用Altair绘制图表，设置Y轴范围
+                import altair as alt
+                
+                # 计算Y轴范围（从数据最小值下方开始）
+                all_values = []
+                for col in ['Call Wall', 'Put Wall', 'Zero Gamma', 'Vol Trigger']:
+                    vals = history_df[col].dropna().tolist()
+                    all_values.extend(vals)
+                
+                if all_values:
+                    y_min = min(all_values) * 0.98  # 留2%空间
+                    y_max = max(all_values) * 1.02
+                else:
+                    y_min, y_max = 500, 700
+                
+                # 转换为长格式
+                chart_data = history_df.melt(
+                    id_vars=['日期'],
+                    value_vars=['Call Wall', 'Put Wall', 'Zero Gamma', 'Vol Trigger'],
+                    var_name='指标',
+                    value_name='价格'
+                )
+                
+                chart = alt.Chart(chart_data).mark_line(point=True).encode(
+                    x=alt.X('日期:T', title='日期'),
+                    y=alt.Y('价格:Q', title='价格', scale=alt.Scale(domain=[y_min, y_max])),
+                    color=alt.Color('指标:N', legend=alt.Legend(title="关键位")),
+                    tooltip=['日期:T', '指标:N', '价格:Q']
+                ).properties(
+                    height=400
+                ).interactive()
+                
+                st.altair_chart(chart, use_container_width=True)
                 
                 # 显示数据表
                 with st.expander("📋 查看历史数据"):
-                    st.dataframe(history_df.reset_index(), use_container_width=True, hide_index=True)
+                    display_df = history_df.copy()
+                    display_df['日期'] = display_df['日期'].dt.strftime('%Y-%m-%d')
+                    st.dataframe(display_df, use_container_width=True, hide_index=True)
             else:
                 st.info("💡 保存至少2天的数据后可查看走势图")
         else:
@@ -7723,27 +7759,48 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                             if v.get('date') == prev_date:
                                 prev_data_dict[v.get('symbol')] = v
                         
-                        # 计算变化并生成信号
+                        # 获取前几天DPI数据（用于计算DPI变化）
+                        prev_dpi_dict = {}  # symbol -> [prev1_dpi, prev2_dpi, ...]
+                        sorted_hist_dates = sorted(set([v.get('date') for v in elite_history.values() if v.get('date') and v.get('date') < data_date_str]), reverse=True)[:5]
+                        for symbol in ELITE_20:
+                            prev_dpi_dict[symbol] = []
+                            for d in sorted_hist_dates:
+                                for k, v in elite_history.items():
+                                    if v.get('date') == d and v.get('symbol') == symbol:
+                                        if v.get('dpi') is not None:
+                                            prev_dpi_dict[symbol].append({'date': d, 'dpi': v.get('dpi')})
+                                        break
+                        
+                        # 计算所有股票数据（不管有没有信号）
+                        all_stocks_data = []
+                        
                         for _, row in today_data.iterrows():
                             symbol = row['symbol']
                             
                             # 当前数据
                             price = row['price']
                             hw = row['hw']
+                            cw = row['cw']
+                            pw = row['pw']
                             dr = row['dr']
                             gr = row['gr']
                             vr = row['vr']
+                            dpi = row['dpi']
+                            dpi_5d = row['dpi_5d']
+                            ne_skew = row['ne_skew']
                             
                             # 前一天数据
                             prev = prev_data_dict.get(symbol, {})
                             prev_dr = prev.get('dr')
                             prev_gr = prev.get('gr')
                             prev_vr = prev.get('vr')
+                            prev_dpi = prev.get('dpi')
                             
                             # 计算变化
                             dr_chg = (dr - prev_dr) if (dr is not None and prev_dr is not None) else None
                             gr_chg = (gr - prev_gr) if (gr is not None and prev_gr is not None) else None
                             vr_chg = (vr - prev_vr) if (vr is not None and prev_vr is not None) else None
+                            dpi_chg = (dpi - prev_dpi) if (dpi is not None and prev_dpi is not None) else None
                             
                             # 判断Gamma环境 (个股用Hedge Wall)
                             gamma_env = 'positive'
@@ -7756,8 +7813,37 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                             # 获取技术指标
                             tech = get_tech_indicators_elite(symbol)
                             
+                            # 构建股票完整数据
+                            stock_info = {
+                                'Symbol': symbol,
+                                'Price': price,
+                                'HW': hw,
+                                'CW': cw,
+                                'PW': pw,
+                                'Gamma_Env': '正' if gamma_env == 'positive' else '负',
+                                'DR': dr,
+                                'GR': gr,
+                                'VR': vr,
+                                'DR_Chg': dr_chg,
+                                'GR_Chg': gr_chg,
+                                'VR_Chg': vr_chg,
+                                'DPI': dpi,
+                                'DPI_Chg': dpi_chg,
+                                'DPI_5d': dpi_5d,
+                                'NE_Skew': ne_skew,
+                                'WT1': tech.get('WT1') if tech else None,
+                                'WT_Dir': tech.get('WT_Dir') if tech else None,
+                                'WT_Status': tech.get('WT_Status') if tech else None,
+                                'RSI': tech.get('RSI') if tech else None,
+                                'Has_Signal': len(combo_sigs) > 0,
+                                'Signals': combo_sigs,
+                                'Prev_DPI_History': prev_dpi_dict.get(symbol, [])
+                            }
+                            
+                            all_stocks_data.append(stock_info)
+                            
+                            # 同时记录有信号的股票
                             for sig in combo_sigs:
-                                # 技术确认
                                 tech_confirm = {'status': '➖', 'bonus': 0, 'reason': ''}
                                 if tech:
                                     tech_confirm = get_tech_confirmation_for_signal(
@@ -7786,84 +7872,191 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                     'Final_Strength': sig['strength'] + tech_confirm['bonus'],
                                     'WT1': tech.get('WT1') if tech else None,
                                     'RSI': tech.get('RSI') if tech else None,
-                                    'DPI': row['dpi'],
-                                    'DPI_5d': row['dpi_5d'],
-                                    'NE_Skew': row['ne_skew']
+                                    'DPI': dpi,
+                                    'DPI_5d': dpi_5d,
+                                    'NE_Skew': ne_skew
                                 })
                         
-                        # 显示信号
+                        # ========== 显示信号统计 ==========
+                        st.subheader(f"🎯 组合信号统计")
+                        
                         if signals_list:
                             signals_df = pd.DataFrame(signals_list)
                             signals_df = signals_df.sort_values('Final_Strength', ascending=False)
                             
-                            st.subheader(f"🎯 组合信号 ({len(signals_df)} 个)")
-                            
-                            # 统计
                             bullish_count = len(signals_df[signals_df['Direction'] == '做多'])
                             bearish_count = len(signals_df[signals_df['Direction'] == '做空'])
                             confirmed_count = len(signals_df[signals_df['Tech_Confirm'].str.contains('✅', na=False)])
-                            
-                            col_stat1, col_stat2, col_stat3 = st.columns(3)
-                            with col_stat1:
-                                st.metric("🚀 做多信号", bullish_count)
-                            with col_stat2:
-                                st.metric("💀 做空信号", bearish_count)
-                            with col_stat3:
-                                st.metric("✅ 技术确认", confirmed_count)
-                            
-                            # 显示表格
+                        else:
+                            bullish_count = bearish_count = confirmed_count = 0
+                        
+                        no_signal_count = len([s for s in all_stocks_data if not s['Has_Signal']])
+                        
+                        col_stat1, col_stat2, col_stat3, col_stat4 = st.columns(4)
+                        with col_stat1:
+                            st.metric("🚀 做多信号", bullish_count)
+                        with col_stat2:
+                            st.metric("💀 做空信号", bearish_count)
+                        with col_stat3:
+                            st.metric("✅ 技术确认", confirmed_count)
+                        with col_stat4:
+                            st.metric("➖ 无信号", no_signal_count)
+                        
+                        # 信号表格
+                        if signals_list:
                             display_cols = ['Symbol', 'Direction', 'Signal', 'Accuracy', 'Final_Strength', 
                                           'Tech_Confirm', 'Conditions']
                             st.dataframe(signals_df[display_cols], hide_index=True, use_container_width=True)
+                        
+                        # ========== 所有20只股票详细展示 ==========
+                        st.divider()
+                        st.subheader(f"📋 20只精选股票详细数据")
+                        
+                        # 筛选器
+                        filter_option = st.radio(
+                            "筛选",
+                            ["全部", "有信号", "无信号"],
+                            horizontal=True,
+                            key="elite20_filter"
+                        )
+                        
+                        # 按信号状态排序（有信号的在前）
+                        sorted_stocks = sorted(all_stocks_data, key=lambda x: (not x['Has_Signal'], x['Symbol']))
+                        
+                        if filter_option == "有信号":
+                            sorted_stocks = [s for s in sorted_stocks if s['Has_Signal']]
+                        elif filter_option == "无信号":
+                            sorted_stocks = [s for s in sorted_stocks if not s['Has_Signal']]
+                        
+                        for stock in sorted_stocks:
+                            symbol = stock['Symbol']
+                            has_sig = stock['Has_Signal']
                             
-                            # 详细信号卡片
-                            st.markdown("### 📋 详细信号")
+                            # 确定边框颜色
+                            if has_sig:
+                                sigs = stock['Signals']
+                                is_bullish = any(s['direction'] == 'bullish' for s in sigs)
+                                border_color = "#00cc66" if is_bullish else "#ff4b4b"
+                                sig_icon = "🚀" if is_bullish else "💀"
+                                sig_text = ", ".join([s['name'] for s in sigs])
+                            else:
+                                border_color = "#888888"
+                                sig_icon = "➖"
+                                sig_text = "无组合信号"
                             
-                            for _, sig in signals_df.head(10).iterrows():
-                                border_color = "#00cc66" if sig['Direction'] == '做多' else "#ff4b4b"
-                                icon = "🚀" if sig['Direction'] == '做多' else "💀"
+                            with st.container():
+                                st.markdown(f"""
+                                <div style="border-left: 4px solid {border_color}; padding-left: 15px; margin: 10px 0; background-color: rgba(0,0,0,0.02);">
+                                <h4>{sig_icon} {symbol} - {stock['Gamma_Env']}Gamma | {sig_text}</h4>
+                                </div>
+                                """, unsafe_allow_html=True)
                                 
-                                with st.container():
-                                    st.markdown(f"""
-                                    <div style="border-left: 4px solid {border_color}; padding-left: 15px; margin: 10px 0;">
-                                    <h4>{icon} {sig['Symbol']} - {sig['Signal']} ({sig['Direction']}) | {sig['Tech_Confirm']}</h4>
-                                    </div>
-                                    """, unsafe_allow_html=True)
+                                # 第一行：价格和关键位
+                                col1, col2, col3, col4, col5 = st.columns(5)
+                                with col1:
+                                    st.metric("价格", f"${stock['Price']:.2f}" if stock['Price'] else "N/A")
+                                with col2:
+                                    st.metric("Hedge Wall", f"${stock['HW']:.0f}" if stock['HW'] else "N/A")
+                                with col3:
+                                    st.metric("Call Wall", f"${stock['CW']:.0f}" if stock['CW'] else "N/A")
+                                with col4:
+                                    st.metric("Put Wall", f"${stock['PW']:.0f}" if stock['PW'] else "N/A")
+                                with col5:
+                                    gamma_color = "🟢" if stock['Gamma_Env'] == '正' else "🔴"
+                                    st.metric("Gamma环境", f"{gamma_color} {stock['Gamma_Env']}")
+                                
+                                # 第二行：VR/GR/DR及其变化
+                                col1, col2, col3, col4, col5, col6 = st.columns(6)
+                                with col1:
+                                    vr_val = f"{stock['VR']:.2f}" if stock['VR'] else "N/A"
+                                    vr_chg = stock['VR_Chg']
+                                    vr_delta = f"{vr_chg:+.2f}" if vr_chg else ""
+                                    st.metric("VR", vr_val, delta=vr_delta)
+                                with col2:
+                                    gr_val = f"{stock['GR']:.2f}" if stock['GR'] else "N/A"
+                                    gr_chg = stock['GR_Chg']
+                                    gr_delta = f"{gr_chg:+.2f}" if gr_chg else ""
+                                    st.metric("GR", gr_val, delta=gr_delta)
+                                with col3:
+                                    dr_val = f"{stock['DR']:.2f}" if stock['DR'] else "N/A"
+                                    dr_chg = stock['DR_Chg']
+                                    dr_delta = f"{dr_chg:+.2f}" if dr_chg else ""
+                                    st.metric("DR", dr_val, delta=dr_delta)
+                                with col4:
+                                    wt_val = f"{stock['WT1']:.1f}" if stock['WT1'] else "N/A"
+                                    wt_status = stock['WT_Status'] or ""
+                                    st.metric(f"WT ({wt_status})", wt_val)
+                                with col5:
+                                    st.metric("WT方向", stock['WT_Dir'] or "N/A")
+                                with col6:
+                                    rsi_val = f"{stock['RSI']:.0f}" if stock['RSI'] else "N/A"
+                                    st.metric("RSI", rsi_val)
+                                
+                                # 第三行：DPI和NE Skew先行指标
+                                with st.expander("📊 先行指标详情", expanded=has_sig):
+                                    col1, col2, col3 = st.columns(3)
                                     
-                                    col1, col2, col3, col4, col5 = st.columns(5)
                                     with col1:
-                                        st.metric("综合强度", f"{'⭐' * min(int(sig['Final_Strength']), 5)}")
+                                        dpi_val = f"{stock['DPI']:.1f}%" if stock['DPI'] else "N/A"
+                                        dpi_chg = stock['DPI_Chg']
+                                        dpi_delta = f"{dpi_chg:+.1f}%" if dpi_chg else ""
+                                        st.metric("今日DPI", dpi_val, delta=dpi_delta)
+                                    
                                     with col2:
-                                        st.metric("准确率", f"{sig['Accuracy']}%")
+                                        dpi5_val = f"{stock['DPI_5d']:.1f}%" if stock['DPI_5d'] else "N/A"
+                                        st.metric("5Day DPI", dpi5_val)
+                                    
                                     with col3:
-                                        st.metric("价格", f"${sig['Price']:.2f}" if sig['Price'] else "N/A")
-                                    with col4:
-                                        st.metric("WT1", f"{sig['WT1']:.1f}" if sig['WT1'] else "N/A")
-                                    with col5:
-                                        st.metric("RSI", f"{sig['RSI']:.0f}" if sig['RSI'] else "N/A")
+                                        ne_val = f"{stock['NE_Skew']:.1f}%" if stock['NE_Skew'] else "N/A"
+                                        st.metric("NE Skew", ne_val)
                                     
-                                    st.markdown(f"**条件**: {sig['Conditions']}")
-                                    st.markdown(f"**MM逻辑**: {sig['MM_Logic']}")
-                                    if sig['Tech_Reason']:
-                                        st.markdown(f"**技术面**: {sig['Tech_Reason']}")
+                                    # DPI历史变化
+                                    if stock['Prev_DPI_History']:
+                                        dpi_hist_str = " → ".join([f"{h['date'][-5:]}: {h['dpi']:.1f}%" for h in stock['Prev_DPI_History'][:3]])
+                                        st.caption(f"DPI历史: {dpi_hist_str}")
                                     
-                                    # 先行指标
-                                    leading_alerts = []
-                                    if sig['NE_Skew'] and sig['NE_Skew'] < -20:
-                                        leading_alerts.append(f"⚠️ NE Skew {sig['NE_Skew']:.1f}% < -20% → T+2/T+3可能暴跌")
-                                    if sig['DPI_5d'] and sig['DPI_5d'] > 55:
-                                        leading_alerts.append(f"📈 5Day DPI {sig['DPI_5d']:.1f}% > 55% → 可能反转上涨")
-                                    if sig['DPI_5d'] and sig['DPI_5d'] < 48:
-                                        leading_alerts.append(f"⚠️ 5Day DPI {sig['DPI_5d']:.1f}% < 48% → 阴跌压力")
+                                    # 先行指标解读
+                                    alerts = []
                                     
-                                    if leading_alerts:
-                                        st.markdown("**先行指标**:")
-                                        for alert in leading_alerts:
-                                            st.markdown(f"• {alert}")
+                                    # NE Skew解读
+                                    ne_skew = stock['NE_Skew']
+                                    if ne_skew is not None:
+                                        if ne_skew < -20:
+                                            alerts.append(f"⚠️ **NE Skew {ne_skew:.1f}%** < -20%: 市场恐慌，T+2/T+3可能暴跌 >1.5% (准确率88%)")
+                                        elif ne_skew < -10:
+                                            alerts.append(f"📉 **NE Skew {ne_skew:.1f}%**: 偏空，市场存在下行压力")
+                                        elif ne_skew > -10:
+                                            alerts.append(f"📈 **NE Skew {ne_skew:.1f}%** > -10%: 恐慌消退，价格开始企稳或反弹 (准确率75%)")
                                     
-                                    st.markdown("---")
-                        else:
-                            st.info("📊 今日无匹配的组合信号")
+                                    # 5Day DPI解读
+                                    dpi_5d = stock['DPI_5d']
+                                    if dpi_5d is not None:
+                                        if dpi_5d > 55:
+                                            alerts.append(f"📈 **5Day DPI {dpi_5d:.1f}%** > 55%: 机构持续买入，可能反转或加速上涨 (准确率80%)")
+                                        elif dpi_5d < 48:
+                                            alerts.append(f"⚠️ **5Day DPI {dpi_5d:.1f}%** < 48%: 动能衰竭，面临阴跌压力 (准确率70%)")
+                                        else:
+                                            alerts.append(f"➖ **5Day DPI {dpi_5d:.1f}%**: 中性区间")
+                                    
+                                    # DPI日变化解读
+                                    dpi_chg = stock['DPI_Chg']
+                                    if dpi_chg is not None:
+                                        if dpi_chg > 5:
+                                            alerts.append(f"📈 **DPI日变化 {dpi_chg:+.1f}%**: 机构买盘大幅增加")
+                                        elif dpi_chg < -5:
+                                            alerts.append(f"📉 **DPI日变化 {dpi_chg:+.1f}%**: 机构买盘大幅减少")
+                                    
+                                    for alert in alerts:
+                                        st.markdown(alert)
+                                
+                                # 如果有信号，显示信号详情
+                                if has_sig:
+                                    for sig in stock['Signals']:
+                                        st.markdown(f"**{sig['name']}** ({sig['direction_cn']}) - 准确率 {sig['accuracy']}%")
+                                        st.markdown(f"条件: {sig['conditions']}")
+                                        st.markdown(f"MM逻辑: {sig['mm_logic']}")
+                                
+                                st.markdown("---")
                     else:
                         st.warning("⚠️ 需要保存历史数据才能计算变化量")
                     
