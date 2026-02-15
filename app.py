@@ -7696,25 +7696,46 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                         cw = parse_number_safe(row.get('Call Wall'))
                         pw = parse_number_safe(row.get('Put Wall'))
                         
-                        dr_raw = str(row.get('Delta Ratio', '')).replace("'", "-")
-                        dr = parse_number_safe(dr_raw)
+                        # Delta Ratio - SpotGamma格式是 '-2.345（单引号+负号）
+                        # parse_number_safe已经处理了开头单引号，直接调用即可
+                        dr = parse_number_safe(row.get('Delta Ratio'))
                         gr = parse_number_safe(row.get('Gamma Ratio'))
                         vr = parse_number_safe(row.get('Volume Ratio'))
                         
                         oi = parse_number_safe(row.get('Options Impact'))
                         
-                        # DPI
-                        dpi = parse_number_safe(row.get('% DPI Volume'))
-                        if dpi and 0 <= dpi <= 1:
-                            dpi = dpi * 100
+                        # DPI - 读取DPI列（核心买卖信号），不是%DPI Volume
+                        # DPI > 55% = 机构买入，DPI < 35% = 机构卖出
+                        dpi_raw = row.get('DPI')
+                        dpi = parse_number_safe(dpi_raw)
+                        if dpi is not None:
+                            # 如果是小数形式（0-1之间），转换为百分比
+                            if 0 <= dpi <= 1:
+                                dpi = dpi * 100
                         
-                        # 5Day DPI
-                        dpi_5d = parse_number_safe(row.get('5d % DPI Volume') or row.get('5 day DPI'))
-                        if dpi_5d and 0 <= dpi_5d <= 1:
+                        # % DPI Volume - 暗池占比，用于验证DPI信号强度
+                        dpi_vol_pct = parse_number_safe(row.get('% DPI Volume'))
+                        if dpi_vol_pct is not None and 0 <= dpi_vol_pct <= 1:
+                            dpi_vol_pct = dpi_vol_pct * 100
+                        
+                        # 5Day DPI - 最重要的趋势信号
+                        dpi_5d_raw = row.get('5Day DPI') or row.get('5 day DPI') or row.get('5d DPI')
+                        dpi_5d = parse_number_safe(dpi_5d_raw)
+                        if dpi_5d is not None and 0 <= dpi_5d <= 1:
                             dpi_5d = dpi_5d * 100
                         
-                        # NE Skew
-                        ne_skew = parse_number_safe(str(row.get('NE Skew', '')).replace('%', ''))
+                        # NE Skew - 如-0.07284413应解读为-7.28%
+                        ne_skew_raw = row.get('NE Skew')
+                        ne_skew = None
+                        if ne_skew_raw is not None:
+                            ne_val = parse_number_safe(str(ne_skew_raw).replace('%', ''))
+                            if ne_val is not None:
+                                # 判断是小数还是百分比
+                                # 如果绝对值<=1，说明是小数形式，需要*100
+                                if abs(ne_val) <= 1:
+                                    ne_skew = ne_val * 100
+                                else:
+                                    ne_skew = ne_val
                         
                         parsed_data.append({
                             'date': data_date_str,
@@ -7728,6 +7749,7 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                             'vr': vr,
                             'oi': oi,
                             'dpi': dpi,
+                            'dpi_vol_pct': dpi_vol_pct,
                             'dpi_5d': dpi_5d,
                             'ne_skew': ne_skew
                         })
@@ -7828,6 +7850,7 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                 'GR_Chg': gr_chg,
                                 'VR_Chg': vr_chg,
                                 'DPI': dpi,
+                                'DPI_Vol_Pct': row.get('dpi_vol_pct'),
                                 'DPI_Chg': dpi_chg,
                                 'DPI_5d': dpi_5d,
                                 'NE_Skew': ne_skew,
@@ -7994,57 +8017,78 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                 
                                 # 第三行：DPI和NE Skew先行指标
                                 with st.expander("📊 先行指标详情", expanded=has_sig):
-                                    col1, col2, col3 = st.columns(3)
+                                    col1, col2, col3, col4 = st.columns(4)
                                     
                                     with col1:
                                         dpi_val = f"{stock['DPI']:.1f}%" if stock['DPI'] else "N/A"
                                         dpi_chg = stock['DPI_Chg']
                                         dpi_delta = f"{dpi_chg:+.1f}%" if dpi_chg else ""
-                                        st.metric("今日DPI", dpi_val, delta=dpi_delta)
+                                        st.metric("DPI", dpi_val, delta=dpi_delta)
                                     
                                     with col2:
                                         dpi5_val = f"{stock['DPI_5d']:.1f}%" if stock['DPI_5d'] else "N/A"
                                         st.metric("5Day DPI", dpi5_val)
                                     
                                     with col3:
-                                        ne_val = f"{stock['NE_Skew']:.1f}%" if stock['NE_Skew'] else "N/A"
+                                        dpi_vol = stock.get('DPI_Vol_Pct')
+                                        dpi_vol_val = f"{dpi_vol:.1f}%" if dpi_vol else "N/A"
+                                        st.metric("%DPI Vol", dpi_vol_val)
+                                    
+                                    with col4:
+                                        ne_val = f"{stock['NE_Skew']:.2f}%" if stock['NE_Skew'] else "N/A"
                                         st.metric("NE Skew", ne_val)
                                     
                                     # DPI历史变化
                                     if stock['Prev_DPI_History']:
-                                        dpi_hist_str = " → ".join([f"{h['date'][-5:]}: {h['dpi']:.1f}%" for h in stock['Prev_DPI_History'][:3]])
-                                        st.caption(f"DPI历史: {dpi_hist_str}")
+                                        dpi_hist_str = " → ".join([f"{h['date'][-5:]}: {h['dpi']:.1f}%" for h in stock['Prev_DPI_History'][:3] if h.get('dpi')])
+                                        if dpi_hist_str:
+                                            st.caption(f"DPI历史: {dpi_hist_str}")
                                     
                                     # 先行指标解读
                                     alerts = []
+                                    
+                                    # DPI核心解读 - 机构暗池买卖信号
+                                    dpi = stock['DPI']
+                                    dpi_vol = stock.get('DPI_Vol_Pct')
+                                    if dpi is not None:
+                                        if dpi > 60:
+                                            signal_strength = "极强" if (dpi_vol and dpi_vol > 30) else "强"
+                                            alerts.append(f"🔥 **DPI {dpi:.1f}%** > 60%: 机构极度看涨扫货 ({signal_strength}信号)")
+                                        elif dpi > 55:
+                                            signal_strength = "强" if (dpi_vol and dpi_vol > 30) else "中等"
+                                            alerts.append(f"📈 **DPI {dpi:.1f}%** > 55%: 机构强力买入 ({signal_strength}信号)")
+                                        elif dpi > 50:
+                                            alerts.append(f"📊 **DPI {dpi:.1f}%**: 机构温和买入")
+                                        elif dpi < 35:
+                                            alerts.append(f"⚠️ **DPI {dpi:.1f}%** < 35%: 机构卖出/派发信号")
+                                        elif dpi < 30:
+                                            alerts.append(f"🔻 **DPI {dpi:.1f}%** < 30%: 机构强力卖出")
+                                    
+                                    # 5Day DPI - 最重要的趋势信号
+                                    dpi_5d = stock['DPI_5d']
+                                    if dpi_5d is not None:
+                                        if dpi_5d > 55:
+                                            alerts.append(f"🎯 **5Day DPI {dpi_5d:.1f}%** > 55%: 机构持续建仓，T+2/T+3可能爆发 (准确率80%)")
+                                        elif dpi_5d < 45:
+                                            alerts.append(f"⚠️ **5Day DPI {dpi_5d:.1f}%** < 45%: 机构持续卖出，面临阴跌压力")
                                     
                                     # NE Skew解读
                                     ne_skew = stock['NE_Skew']
                                     if ne_skew is not None:
                                         if ne_skew < -20:
-                                            alerts.append(f"⚠️ **NE Skew {ne_skew:.1f}%** < -20%: 市场恐慌，T+2/T+3可能暴跌 >1.5% (准确率88%)")
+                                            alerts.append(f"🚨 **NE Skew {ne_skew:.2f}%** < -20%: 市场恐慌，T+2/T+3可能暴跌 >1.5% (准确率88%)")
                                         elif ne_skew < -10:
-                                            alerts.append(f"📉 **NE Skew {ne_skew:.1f}%**: 偏空，市场存在下行压力")
-                                        elif ne_skew > -10:
-                                            alerts.append(f"📈 **NE Skew {ne_skew:.1f}%** > -10%: 恐慌消退，价格开始企稳或反弹 (准确率75%)")
+                                            alerts.append(f"📉 **NE Skew {ne_skew:.2f}%**: 偏空，存在下行压力")
+                                        elif ne_skew > -5:
+                                            alerts.append(f"📈 **NE Skew {ne_skew:.2f}%** > -5%: 恐慌消退，价格企稳或反弹 (准确率75%)")
                                     
-                                    # 5Day DPI解读
-                                    dpi_5d = stock['DPI_5d']
-                                    if dpi_5d is not None:
-                                        if dpi_5d > 55:
-                                            alerts.append(f"📈 **5Day DPI {dpi_5d:.1f}%** > 55%: 机构持续买入，可能反转或加速上涨 (准确率80%)")
-                                        elif dpi_5d < 48:
-                                            alerts.append(f"⚠️ **5Day DPI {dpi_5d:.1f}%** < 48%: 动能衰竭，面临阴跌压力 (准确率70%)")
-                                        else:
-                                            alerts.append(f"➖ **5Day DPI {dpi_5d:.1f}%**: 中性区间")
-                                    
-                                    # DPI日变化解读
+                                    # DPI变化解读 (T vs T-2)
                                     dpi_chg = stock['DPI_Chg']
                                     if dpi_chg is not None:
                                         if dpi_chg > 5:
-                                            alerts.append(f"📈 **DPI日变化 {dpi_chg:+.1f}%**: 机构买盘大幅增加")
+                                            alerts.append(f"📈 **DPI变化(T-2) {dpi_chg:+.1f}%**: 机构买盘大幅增加")
                                         elif dpi_chg < -5:
-                                            alerts.append(f"📉 **DPI日变化 {dpi_chg:+.1f}%**: 机构买盘大幅减少")
+                                            alerts.append(f"📉 **DPI变化(T-2) {dpi_chg:+.1f}%**: 机构买盘大幅减少")
                                     
                                     for alert in alerts:
                                         st.markdown(alert)
