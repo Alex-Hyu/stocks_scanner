@@ -3404,14 +3404,18 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                     if ne_val is not None:
                         today_ne_skew = ne_val * 100 if abs(ne_val) <= 1 else ne_val
                 
-                # 5Day DPI - 尝试多种列名
-                dpi_5d_raw = (csv_data.get('5Day DPI') or 
-                              csv_data.get('5 day DPI') or 
-                              csv_data.get('5d DPI') or
-                              csv_data.get('5 Day DPI') or
-                              csv_data.get('5day DPI') or
-                              csv_data.get('5d % DPI Volume') or
-                              csv_data.get('5 day % DPI Volume'))
+                # 5Day DPI - 精确匹配列名
+                # 先检查csv_data中的所有列名（调试用）
+                dpi_5d_raw = None
+                for col_name in csv_data.keys():
+                    if '5' in str(col_name) and 'DPI' in str(col_name).upper():
+                        dpi_5d_raw = csv_data.get(col_name)
+                        break
+                
+                # 如果没找到，尝试精确匹配
+                if dpi_5d_raw is None:
+                    dpi_5d_raw = csv_data.get('5Day DPI')
+                
                 today_dpi_5d = parse_number_safe(str(dpi_5d_raw).replace('%', '')) if dpi_5d_raw else None
                 if today_dpi_5d is not None and today_dpi_5d <= 1:
                     today_dpi_5d = today_dpi_5d * 100
@@ -3487,14 +3491,19 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
             with col_lead3:
                 st.metric("5Day DPI", f"{today_dpi_5d:.1f}%" if today_dpi_5d else "N/A")
             
-            # 显示过去3天的先行指标数值
+            # 显示T, T-1, T-2的先行指标数值
             if qqq_csv_df is not None and len(qqq_csv_df) >= 3:
-                with st.expander("📈 先行指标历史 (过去3天)", expanded=False):
+                with st.expander("📈 先行指标历史 (T, T-1, T-2)", expanded=False):
                     hist_rows = []
-                    for i in range(-3, 0):
-                        if len(qqq_csv_df) >= abs(i):
+                    # 数据已按Date降序排序：索引0=T(最新), 1=T-1, 2=T-2
+                    for i in range(3):
+                        if len(qqq_csv_df) > i:
                             row = qqq_csv_df.iloc[i]
-                            date_val = row.get('Date', f'T{i}')
+                            date_val = row['Date']
+                            if hasattr(date_val, 'strftime'):
+                                date_val = date_val.strftime('%Y-%m-%d')
+                            
+                            label = ['T (今日)', 'T-1', 'T-2'][i]
                             
                             dpi_val = parse_number_safe(str(row.get('DPI', '')))
                             if dpi_val is not None and dpi_val <= 1:
@@ -3504,15 +3513,18 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                             if ne_val is not None and abs(ne_val) <= 1:
                                 ne_val = ne_val * 100
                             
-                            dpi5_val = parse_number_safe(str(row.get('5Day DPI', '')).replace('%', ''))
+                            # 5Day DPI - 精确匹配列名
+                            dpi5_raw = row.get('5Day DPI')
+                            dpi5_val = parse_number_safe(str(dpi5_raw).replace('%', '')) if dpi5_raw is not None else None
                             if dpi5_val is not None and dpi5_val <= 1:
                                 dpi5_val = dpi5_val * 100
                             
                             hist_rows.append({
+                                '': label,
                                 '日期': date_val,
-                                'DPI': f"{dpi_val:.1f}%" if dpi_val else "N/A",
-                                'NE Skew': f"{ne_val:.2f}%" if ne_val else "N/A",
-                                '5Day DPI': f"{dpi5_val:.1f}%" if dpi5_val else "N/A"
+                                'DPI': f"{dpi_val:.1f}%" if dpi_val is not None else "N/A",
+                                'NE Skew': f"{ne_val:.2f}%" if ne_val is not None else "N/A",
+                                '5Day DPI': f"{dpi5_val:.1f}%" if dpi5_val is not None else "N/A"
                             })
                     
                     if hist_rows:
