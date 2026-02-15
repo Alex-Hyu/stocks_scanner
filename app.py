@@ -3259,15 +3259,34 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
             key="premarket_input"
         )
         
-        # 解析CSV数据
+        # 解析CSV数据 - 读取多天数据
         csv_data = None
+        csv_data_prev = None  # T-1数据
+        csv_data_prev2 = None  # T-2数据
+        qqq_csv_df = None
+        
         if qqq_csv_file is not None:
             try:
                 qqq_csv_df = pd.read_csv(qqq_csv_file)
-                # 取最新一行
                 if not qqq_csv_df.empty:
-                    csv_data = qqq_csv_df.iloc[-1].to_dict()
-                    st.success(f"✅ 已加载QQQ CSV数据")
+                    # 按日期排序（假设有Date列，否则按行顺序）
+                    if 'Date' in qqq_csv_df.columns:
+                        qqq_csv_df = qqq_csv_df.sort_values('Date')
+                    
+                    # 取最新几行
+                    if len(qqq_csv_df) >= 1:
+                        csv_data = qqq_csv_df.iloc[-1].to_dict()  # T (最新)
+                    if len(qqq_csv_df) >= 2:
+                        csv_data_prev = qqq_csv_df.iloc[-2].to_dict()  # T-1
+                    if len(qqq_csv_df) >= 3:
+                        csv_data_prev2 = qqq_csv_df.iloc[-3].to_dict()  # T-2
+                    
+                    st.success(f"✅ 已加载QQQ CSV数据: {len(qqq_csv_df)} 天")
+                    
+                    # 显示日期范围
+                    if 'Date' in qqq_csv_df.columns:
+                        dates = qqq_csv_df['Date'].tolist()
+                        st.caption(f"日期范围: {dates[0]} ~ {dates[-1]}")
             except Exception as e:
                 st.warning(f"⚠️ CSV读取失败: {e}")
         
