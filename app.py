@@ -1511,9 +1511,202 @@ def analyze_qqq_nq(premarket_data, csv_data=None):
 # 组合信号框架 (VR/GR/DR变化 + Gamma环境)
 # ============================================================
 
+def classify_vr_change(vr_change, gr_change, dr_change, 
+                       put_vol_t, put_vol_t1, call_vol_t, call_vol_t1):
+    """
+    新信号框架：基于VR变化驱动分类 (A/B/C/D类)
+    
+    Step 2: 计算Put/Call Volume变化
+    Step 3: 分类VR变化驱动
+    
+    返回:
+        dict: 分类结果 {type, direction, strength, reason, mm_analysis}
+    """
+    result = {
+        'type': None,       # 'A', 'B', 'C', 'D' or None
+        'direction': None,  # 'bullish', 'bearish', or None
+        'strength': 0,
+        'reason': '',
+        'mm_analysis': '',
+        'put_delta': None,
+        'call_delta': None,
+        'put_chg_pct': None,
+        'call_chg_pct': None
+    }
+    
+    if vr_change is None:
+        return result
+    
+    # Step 2: 计算Put/Call Volume变化
+    put_delta = None
+    call_delta = None
+    put_chg_pct = None
+    call_chg_pct = None
+    
+    if put_vol_t is not None and put_vol_t1 is not None and put_vol_t1 != 0:
+        put_delta = put_vol_t - put_vol_t1
+        put_chg_pct = (put_delta / put_vol_t1) * 100
+    if call_vol_t is not None and call_vol_t1 is not None and call_vol_t1 != 0:
+        call_delta = call_vol_t - call_vol_t1
+        call_chg_pct = (call_delta / call_vol_t1) * 100
+    
+    result['put_delta'] = put_delta
+    result['call_delta'] = call_delta
+    result['put_chg_pct'] = put_chg_pct
+    result['call_chg_pct'] = call_chg_pct
+    
+    # Step 3: 分类VR变化驱动
+    vr_up = vr_change > 0.05
+    vr_down = vr_change < -0.05
+    
+    gr_chg = gr_change if gr_change is not None else 0
+    
+    if vr_up:
+        # VR上升分支
+        if put_delta is not None and call_delta is not None:
+            if put_delta > 0 and put_chg_pct is not None and call_chg_pct is not None:
+                if put_chg_pct > call_chg_pct:
+                    # A类: VR↑ 且 PutΔ>0 且 Put增幅% > Call增幅%
+                    result['type'] = 'A'
+                    result['direction'] = 'bullish'
+                    result['strength'] = 4
+                    result['reason'] = (
+                        f"A类做多✓: VR↑{vr_change:+.2f}, Put Vol增加{put_delta:+.0f}({put_chg_pct:+.1f}%) > "
+                        f"Call Vol变化{call_delta:+.0f}({call_chg_pct:+.1f}%)"
+                    )
+                    result['mm_analysis'] = (
+                        "ATM Put成交量增多 → 做市商卖出更多Put(Short Put) → "
+                        "做市商需买入标的对冲Short Put Delta → 买盘推动价格上涨"
+                    )
+            
+            if result['type'] is None and call_delta is not None and call_delta < 0:
+                # B类: VR↑ 且 CallΔ<0 为主要驱动 → 需GR确认
+                if gr_chg < -0.05:
+                    result['type'] = 'B'
+                    result['direction'] = 'bullish'
+                    result['strength'] = 3
+                    result['reason'] = (
+                        f"B类做多✓(GR确认): VR↑{vr_change:+.2f}, Call Vol减少{call_delta:+.0f}({call_chg_pct:+.1f}%), "
+                        f"GR↓{gr_chg:+.2f}确认"
+                    )
+                    result['mm_analysis'] = (
+                        "Call成交减少为VR上升主因 → 做市商买回Call平仓(平掉Short Call) → "
+                        "做市商平掉Short Call对冲空头 → 减少卖股对冲 → GR↓确认Call Gamma主导"
+                    )
+                elif gr_chg > 0.05:
+                    result['type'] = 'B_rejected'
+                    result['direction'] = None
+                    result['strength'] = 0
+                    result['reason'] = (
+                        f"B类不操作: VR↑{vr_change:+.2f}但Call Vol减少{call_delta:+.0f}({call_chg_pct:+.1f}%), "
+                        f"GR↑{gr_chg:+.2f}不支持(Put Gamma仍主导)"
+                    )
+                    result['mm_analysis'] = "GR上升表示Put Gamma仍主导，VR上升信号不可靠，建议不操作"
+        
+        # 如果没有Volume数据，用传统VR/GR/DR判断
+        if result['type'] is None and put_delta is None:
+            result['type'] = 'A_legacy'
+            result['direction'] = 'bullish'
+            result['strength'] = 3
+            result['reason'] = f"VR↑{vr_change:+.2f} (无详细Volume数据，使用传统判断)"
+            result['mm_analysis'] = "VR上升 = ATM Put/Call比率增加 → MM卖出更多Put → 需买股对冲 → 推动上涨"
+    
+    elif vr_down:
+        # VR下降分支
+        if put_delta is not None and call_delta is not None:
+            if put_delta < 0 and put_chg_pct is not None and call_chg_pct is not None:
+                if abs(put_chg_pct) > abs(call_chg_pct):
+                    # C类: VR↓ 且 PutΔ<0 且 Put减幅% > Call减幅%
+                    result['type'] = 'C'
+                    result['direction'] = 'bearish'
+                    result['strength'] = 4
+                    result['reason'] = (
+                        f"C类做空✓: VR↓{vr_change:+.2f}, Put Vol减少{put_delta:+.0f}({put_chg_pct:+.1f}%) > "
+                        f"Call Vol变化{call_delta:+.0f}({call_chg_pct:+.1f}%)"
+                    )
+                    result['mm_analysis'] = (
+                        "ATM Put成交量减少 → 做市商Short Put敞口减少(投资者平仓或不再买Put) → "
+                        "做市商不需要继续持有对冲多头 → 卖出标的平仓 → 卖压推动价格下跌"
+                    )
+            
+            if result['type'] is None and call_delta is not None and call_delta > 0:
+                # D类: VR↓ 且 CallΔ>0 为主要驱动 → 最强做空
+                result['type'] = 'D'
+                result['direction'] = 'bearish'
+                result['strength'] = 5
+                result['reason'] = (
+                    f"D类做空✓✓(最强): VR↓{vr_change:+.2f}, Call Vol增加{call_delta:+.0f}({call_chg_pct:+.1f}%) "
+                    f"为主要驱动"
+                )
+                result['mm_analysis'] = (
+                    "Call成交增加为VR下降主因(分母增大) → 做市商卖出更多Call(Short Call) → "
+                    "做市商需卖出标的对冲Short Call Delta → 卖压推动价格下跌 → 最强做空信号"
+                )
+        
+        # 如果没有Volume数据
+        if result['type'] is None and put_delta is None:
+            result['type'] = 'C_legacy'
+            result['direction'] = 'bearish'
+            result['strength'] = 4
+            result['reason'] = f"VR↓{vr_change:+.2f} (无详细Volume数据，使用传统判断，VR下降做空100%准确)"
+            result['mm_analysis'] = "VR下降 = ATM Put/Call比率减少 → MM Short Put敞口减少或Short Call增加 → 卖股对冲 → 下跌"
+    
+    return result
+
+
+def analyze_next_exp_vol_pressure(csv_data):
+    """
+    分析Next Exp Call Vol vs Put Vol，判断做市商日内对冲压力方向
+    """
+    result = {
+        'ne_call_vol': None,
+        'ne_put_vol': None,
+        'pressure_side': None,  # 'call_pressure', 'put_pressure', 'balanced'
+        'diff_pct': None,
+        'analysis': ''
+    }
+    
+    if csv_data is None:
+        return result
+    
+    ne_call = parse_number_safe(str(csv_data.get('Next Exp Call Vol', '') or csv_data.get('NE Call Vol', '')))
+    ne_put = parse_number_safe(str(csv_data.get('Next Exp Put Vol', '') or csv_data.get('NE Put Vol', '')))
+    
+    result['ne_call_vol'] = ne_call
+    result['ne_put_vol'] = ne_put
+    
+    if ne_call and ne_put and (ne_call + ne_put) > 0:
+        total = ne_call + ne_put
+        diff_pct = ((ne_call - ne_put) / total) * 100
+        result['diff_pct'] = diff_pct
+        
+        if diff_pct > 10:
+            result['pressure_side'] = 'call_pressure'
+            result['analysis'] = (
+                f"Next Exp Call Vol ({ne_call:,.0f}) > Put Vol ({ne_put:,.0f})，差值 {diff_pct:+.1f}%\n"
+                f"📉 做市商日内重心：控制Call风险 → 通常向上压制\n"
+                f"MM卖出大量Short Call → 需卖标的对冲 → 上方阻力增强"
+            )
+        elif diff_pct < -10:
+            result['pressure_side'] = 'put_pressure'
+            result['analysis'] = (
+                f"Next Exp Put Vol ({ne_put:,.0f}) > Call Vol ({ne_call:,.0f})，差值 {diff_pct:+.1f}%\n"
+                f"📈 做市商日内重心：控制Put风险 → 通常向下支撑或诱跌\n"
+                f"MM卖出大量Short Put → 需买标的对冲 → 下方支撑增强"
+            )
+        else:
+            result['pressure_side'] = 'balanced'
+            result['analysis'] = (
+                f"Next Exp Call Vol ({ne_call:,.0f}) ≈ Put Vol ({ne_put:,.0f})，差值 {diff_pct:+.1f}%\n"
+                f"⚖️ 做市商压力均衡，无明显单边对冲倾向"
+            )
+    
+    return result
+
+
 def match_combo_signals(gamma_env, vr_change, gr_change, dr_change):
     """
-    匹配组合信号
+    匹配组合信号 (保留A-I框架作为辅助确认)
     
     参数:
         gamma_env: 'positive' (价格>ZG/HW) 或 'negative' (价格<ZG/HW)
@@ -3371,7 +3564,7 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
             
             # ===== 组合信号分析 (新框架) =====
             st.subheader("🎯 组合信号分析")
-            st.caption("基于VR/GR/DR日变化 + Gamma环境的100%准确率组合信号")
+            st.caption("基于VR变化驱动分类(A/B/C/D) + Gamma环境 + 技术面确认")
             
             # 加载历史数据用于计算变化量
             QQQ_DAILY_WS = "qqq_daily_data"
@@ -3382,6 +3575,11 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
             today_gr = None
             today_dr = None
             today_hw = None  # Hedge Wall (QQQ用Zero Gamma)
+            today_put_vol = None
+            today_call_vol = None
+            today_ne_call_vol = None
+            today_ne_put_vol = None
+            today_options_impact = None
             
             if csv_data:
                 today_vr = parse_number_safe(str(csv_data.get('Volume Ratio', '')))
@@ -3391,10 +3589,30 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                 # QQQ的Hedge Wall用Zero Gamma
                 today_hw = parse_number_safe(str(csv_data.get('Zero Gamma', ''))) or qqq.get('zero_gamma')
                 
+                # Put/Call Volume
+                today_put_vol = parse_number_safe(str(csv_data.get('Put Vol', '') or csv_data.get('Put Volume', '')))
+                today_call_vol = parse_number_safe(str(csv_data.get('Call Vol', '') or csv_data.get('Call Volume', '')))
+                
+                # Next Exp Call/Put Vol
+                today_ne_call_vol = parse_number_safe(str(csv_data.get('Next Exp Call Vol', '') or csv_data.get('NE Call Vol', '')))
+                today_ne_put_vol = parse_number_safe(str(csv_data.get('Next Exp Put Vol', '') or csv_data.get('NE Put Vol', '')))
+                
+                # Options Impact
+                oi_raw = csv_data.get('Options Impact')
+                if oi_raw is not None:
+                    today_options_impact = parse_number_safe(str(oi_raw).replace('%', ''))
+                    if today_options_impact is not None and today_options_impact > 0 and today_options_impact < 1:
+                        today_options_impact = today_options_impact * 100
+                
                 # 今日DPI（读取DPI列，不是%DPI Volume）
                 today_dpi = parse_number_safe(str(csv_data.get('DPI', '')))
                 if today_dpi is not None and today_dpi <= 1:
                     today_dpi = today_dpi * 100
+                
+                # %DPI Volume
+                today_dpi_vol_pct = parse_number_safe(str(csv_data.get('%DPI Volume', '') or csv_data.get('% DPI Volume', '')))
+                if today_dpi_vol_pct is not None and 0 <= today_dpi_vol_pct <= 1:
+                    today_dpi_vol_pct = today_dpi_vol_pct * 100
                 
                 # 今日NE Skew
                 ne_raw = csv_data.get('NE Skew') or csv_data.get('Next Exp Skew')
@@ -3405,17 +3623,13 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                         today_ne_skew = ne_val * 100 if abs(ne_val) <= 1 else ne_val
                 
                 # 5Day DPI - 精确匹配列名
-                # 先检查csv_data中的所有列名（调试用）
                 dpi_5d_raw = None
                 for col_name in csv_data.keys():
                     if '5' in str(col_name) and 'DPI' in str(col_name).upper():
                         dpi_5d_raw = csv_data.get(col_name)
                         break
-                
-                # 如果没找到，尝试精确匹配
                 if dpi_5d_raw is None:
                     dpi_5d_raw = csv_data.get('5Day DPI')
-                
                 today_dpi_5d = parse_number_safe(str(dpi_5d_raw).replace('%', '')) if dpi_5d_raw else None
                 if today_dpi_5d is not None and today_dpi_5d <= 1:
                     today_dpi_5d = today_dpi_5d * 100
@@ -3425,28 +3639,79 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
             prev_gr = None
             prev_dr = None
             prev_date_str = None
+            prev_put_vol = None
+            prev_call_vol = None
+            prev_ne_skew = None
+            prev_dpi = None
+            prev_dpi_vol_pct = None
+            prev_dpi_5d = None
             
             if csv_data_prev:
                 prev_vr = parse_number_safe(str(csv_data_prev.get('Volume Ratio', '')))
                 prev_gr = parse_number_safe(str(csv_data_prev.get('Gamma Ratio', '')))
                 prev_dr = parse_number_safe(csv_data_prev.get('Delta Ratio'))
                 prev_date_str = csv_data_prev.get('Date', 'T-1')
+                prev_put_vol = parse_number_safe(str(csv_data_prev.get('Put Vol', '') or csv_data_prev.get('Put Volume', '')))
+                prev_call_vol = parse_number_safe(str(csv_data_prev.get('Call Vol', '') or csv_data_prev.get('Call Volume', '')))
+                
+                ne_raw_p = csv_data_prev.get('NE Skew') or csv_data_prev.get('Next Exp Skew')
+                if ne_raw_p is not None:
+                    ne_val_p = parse_number_safe(str(ne_raw_p).replace('%', ''))
+                    if ne_val_p is not None:
+                        prev_ne_skew = ne_val_p * 100 if abs(ne_val_p) <= 1 else ne_val_p
+                
+                prev_dpi = parse_number_safe(str(csv_data_prev.get('DPI', '')))
+                if prev_dpi is not None and prev_dpi <= 1:
+                    prev_dpi = prev_dpi * 100
+                
+                prev_dpi_vol_pct = parse_number_safe(str(csv_data_prev.get('%DPI Volume', '') or csv_data_prev.get('% DPI Volume', '')))
+                if prev_dpi_vol_pct is not None and 0 <= prev_dpi_vol_pct <= 1:
+                    prev_dpi_vol_pct = prev_dpi_vol_pct * 100
+                
+                dpi_5d_raw_p = None
+                for col_name in csv_data_prev.keys():
+                    if '5' in str(col_name) and 'DPI' in str(col_name).upper():
+                        dpi_5d_raw_p = csv_data_prev.get(col_name)
+                        break
+                if dpi_5d_raw_p is None:
+                    dpi_5d_raw_p = csv_data_prev.get('5Day DPI')
+                prev_dpi_5d = parse_number_safe(str(dpi_5d_raw_p).replace('%', '')) if dpi_5d_raw_p else None
+                if prev_dpi_5d is not None and prev_dpi_5d <= 1:
+                    prev_dpi_5d = prev_dpi_5d * 100
             
-            # 从CSV读取T-2数据（用于DPI/NE Skew变化计算）
-            prev2_dpi = None
+            # 从CSV读取T-2数据
             prev2_ne_skew = None
+            prev2_dpi = None
+            prev2_dpi_vol_pct = None
+            prev2_dpi_5d = None
             prev2_date_str = None
             
             if csv_data_prev2:
-                prev2_dpi = parse_number_safe(str(csv_data_prev2.get('DPI', '')))
-                if prev2_dpi is not None and prev2_dpi <= 1:
-                    prev2_dpi = prev2_dpi * 100
-                
                 ne_raw2 = csv_data_prev2.get('NE Skew') or csv_data_prev2.get('Next Exp Skew')
                 if ne_raw2 is not None:
                     ne_val2 = parse_number_safe(str(ne_raw2).replace('%', ''))
                     if ne_val2 is not None:
                         prev2_ne_skew = ne_val2 * 100 if abs(ne_val2) <= 1 else ne_val2
+                
+                prev2_dpi = parse_number_safe(str(csv_data_prev2.get('DPI', '')))
+                if prev2_dpi is not None and prev2_dpi <= 1:
+                    prev2_dpi = prev2_dpi * 100
+                
+                prev2_dpi_vol_pct = parse_number_safe(str(csv_data_prev2.get('%DPI Volume', '') or csv_data_prev2.get('% DPI Volume', '')))
+                if prev2_dpi_vol_pct is not None and 0 <= prev2_dpi_vol_pct <= 1:
+                    prev2_dpi_vol_pct = prev2_dpi_vol_pct * 100
+                
+                dpi_5d_raw_2 = None
+                for col_name in csv_data_prev2.keys():
+                    if '5' in str(col_name) and 'DPI' in str(col_name).upper():
+                        dpi_5d_raw_2 = csv_data_prev2.get(col_name)
+                        break
+                if dpi_5d_raw_2 is None:
+                    dpi_5d_raw_2 = csv_data_prev2.get('5Day DPI')
+                prev2_dpi_5d = parse_number_safe(str(dpi_5d_raw_2).replace('%', '')) if dpi_5d_raw_2 else None
+                if prev2_dpi_5d is not None and prev2_dpi_5d <= 1:
+                    prev2_dpi_5d = prev2_dpi_5d * 100
+                
                 prev2_date_str = csv_data_prev2.get('Date', 'T-2')
             
             # 计算VR/GR/DR变化量 (T vs T-1)
@@ -3454,12 +3719,41 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
             gr_change = (today_gr - prev_gr) if (today_gr is not None and prev_gr is not None) else None
             dr_change = (today_dr - prev_dr) if (today_dr is not None and prev_dr is not None) else None
             
-            # 计算先行指标变化量 (T vs T-2)
-            dpi_change_t2 = (today_dpi - prev2_dpi) if (today_dpi is not None and prev2_dpi is not None) else None
-            ne_skew_change_t2 = (today_ne_skew - prev2_ne_skew) if (today_ne_skew is not None and prev2_ne_skew is not None) else None
+            # ===== 1. Gamma环境判断 (盘前价 vs Zero Gamma) =====
+            st.markdown("### 🌡️ Gamma环境")
             
-            # 显示VR/GR/DR及变化
-            st.markdown("**📊 VR/GR/DR (T vs T-1)**")
+            # 盘前价格刷新按钮
+            col_gamma1, col_gamma2 = st.columns([1, 3])
+            with col_gamma1:
+                refresh_qqq_price = st.button("🔄 刷新QQQ盘前价", key="refresh_qqq_premarket")
+            
+            qqq_live_price = qqq.get('current')
+            if refresh_qqq_price:
+                try:
+                    _ticker = yf.Ticker("QQQ")
+                    _info = _ticker.info
+                    _live = _info.get('preMarketPrice') or _info.get('regularMarketPrice')
+                    if _live:
+                        qqq_live_price = float(_live)
+                        st.session_state['qqq_live_price'] = qqq_live_price
+                        st.success(f"✅ QQQ实时价: ${qqq_live_price:.2f}")
+                except Exception as e:
+                    st.warning(f"获取失败: {e}")
+            elif 'qqq_live_price' in st.session_state:
+                qqq_live_price = st.session_state['qqq_live_price']
+            
+            current_price = qqq_live_price or qqq.get('current')
+            gamma_env = 'positive'
+            if current_price and today_hw:
+                if current_price > today_hw:
+                    gamma_env = 'positive'
+                    st.success(f"**Gamma环境**: 🟢 正Gamma (盘前价 {current_price:.2f} > Zero Gamma {today_hw:.0f}) → MM卖压抑制上涨，信号幅度被压缩，快进快出")
+                else:
+                    gamma_env = 'negative'
+                    st.error(f"**Gamma环境**: 🔴 负Gamma (盘前价 {current_price:.2f} < Zero Gamma {today_hw:.0f}) → MM对冲放大波动，信号方向被放大")
+            
+            # ===== 2. VR/GR/DR数据及变化 =====
+            st.markdown("### 📊 VR/GR/DR变化分析 (T vs T-1)")
             if prev_date_str:
                 st.caption(f"对比: {prev_date_str} → 今日")
             
@@ -3476,175 +3770,288 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
             with col_vgd4:
                 st.metric("Zero Gamma", f"{today_hw:.0f}" if today_hw else "N/A")
             
-            # 显示先行指标 (T vs T-2)
-            st.markdown("**⏰ 先行指标 (T vs T-2)**")
-            if prev2_date_str:
-                st.caption(f"对比: {prev2_date_str} → 今日")
-            
-            col_lead1, col_lead2, col_lead3 = st.columns(3)
-            with col_lead1:
-                dpi_delta = f"{dpi_change_t2:+.1f}%" if dpi_change_t2 is not None else None
-                st.metric("DPI", f"{today_dpi:.1f}%" if today_dpi else "N/A", delta=dpi_delta)
-            with col_lead2:
-                ne_delta = f"{ne_skew_change_t2:+.1f}%" if ne_skew_change_t2 is not None else None
-                st.metric("NE Skew", f"{today_ne_skew:.2f}%" if today_ne_skew else "N/A", delta=ne_delta)
-            with col_lead3:
-                st.metric("5Day DPI", f"{today_dpi_5d:.1f}%" if today_dpi_5d else "N/A")
-            
-            # 显示T, T-1, T-2的先行指标数值
-            if qqq_csv_df is not None and len(qqq_csv_df) >= 3:
-                with st.expander("📈 先行指标历史 (T, T-1, T-2)", expanded=False):
-                    hist_rows = []
-                    # 数据已按Date降序排序：索引0=T(最新), 1=T-1, 2=T-2
-                    for i in range(3):
-                        if len(qqq_csv_df) > i:
-                            row = qqq_csv_df.iloc[i]
-                            date_val = row['Date']
-                            if hasattr(date_val, 'strftime'):
-                                date_val = date_val.strftime('%Y-%m-%d')
-                            
-                            label = ['T (今日)', 'T-1', 'T-2'][i]
-                            
-                            dpi_val = parse_number_safe(str(row.get('DPI', '')))
-                            if dpi_val is not None and dpi_val <= 1:
-                                dpi_val = dpi_val * 100
-                            
-                            ne_val = parse_number_safe(str(row.get('NE Skew', '')).replace('%', ''))
-                            if ne_val is not None and abs(ne_val) <= 1:
-                                ne_val = ne_val * 100
-                            
-                            # 5Day DPI - 精确匹配列名
-                            dpi5_raw = row.get('5Day DPI')
-                            dpi5_val = parse_number_safe(str(dpi5_raw).replace('%', '')) if dpi5_raw is not None else None
-                            if dpi5_val is not None and dpi5_val <= 1:
-                                dpi5_val = dpi5_val * 100
-                            
-                            hist_rows.append({
-                                '': label,
-                                '日期': date_val,
-                                'DPI': f"{dpi_val:.1f}%" if dpi_val is not None else "N/A",
-                                'NE Skew': f"{ne_val:.2f}%" if ne_val is not None else "N/A",
-                                '5Day DPI': f"{dpi5_val:.1f}%" if dpi5_val is not None else "N/A"
-                            })
+            # VR/GR/DR意义总结
+            with st.expander("📖 VR/GR/DR变化深度分析", expanded=True):
+                # Volume Ratio分析
+                if vr_change is not None:
+                    vr_icon = "🔴" if vr_change < -0.05 else ("🟢" if vr_change > 0.05 else "⚪")
+                    st.markdown(f"**{vr_icon} Volume Ratio (VR)**: {today_vr:.2f} (变化 {vr_change:+.2f})")
+                    st.markdown("VR = ATM Put Delta成交量 / ATM Call Delta成交量")
+                    if vr_change > 0.05:
+                        st.markdown("VR↑ → ATM Put相对成交增加 → MM卖出更多Put → 需买股对冲 → **看涨信号**")
+                    elif vr_change < -0.05:
+                        st.markdown("VR↓ → ATM Put相对成交减少 → MM Short Put敞口减少 → 卖股平仓 → **看跌信号**")
                     
-                    if hist_rows:
-                        st.dataframe(pd.DataFrame(hist_rows), hide_index=True, use_container_width=True)
+                    # 结合Call/Put Volume深度分析
+                    if today_put_vol is not None and prev_put_vol is not None:
+                        put_delta_v = today_put_vol - prev_put_vol
+                        put_chg_pct = (put_delta_v / prev_put_vol * 100) if prev_put_vol != 0 else 0
+                        call_delta_v = (today_call_vol - prev_call_vol) if (today_call_vol is not None and prev_call_vol is not None) else None
+                        call_chg_pct = ((today_call_vol - prev_call_vol) / prev_call_vol * 100) if (prev_call_vol and prev_call_vol != 0 and today_call_vol is not None) else None
+                        
+                        st.markdown(f"  - Put Vol: {today_put_vol:,.0f} (T-1: {prev_put_vol:,.0f}, Δ={put_delta_v:+,.0f}, {put_chg_pct:+.1f}%)")
+                        if call_delta_v is not None:
+                            st.markdown(f"  - Call Vol: {today_call_vol:,.0f} (T-1: {prev_call_vol:,.0f}, Δ={call_delta_v:+,.0f}, {call_chg_pct:+.1f}%)")
+                        
+                        # MM仓位变化分析
+                        st.markdown("**做市商仓位变化分析:**")
+                        if put_delta_v > 0:
+                            st.markdown(f"  - Put成交增加{put_delta_v:+,.0f} → MM卖出更多Put(Short Put增加) → 需买股对冲Short Put Delta")
+                        elif put_delta_v < 0:
+                            st.markdown(f"  - Put成交减少{put_delta_v:+,.0f} → 投资者平仓Put/MM买回Put → MM Short Put减少 → 卖出对冲多头")
+                        
+                        if call_delta_v is not None:
+                            if call_delta_v > 0:
+                                st.markdown(f"  - Call成交增加{call_delta_v:+,.0f} → MM卖出更多Call(Short Call增加) → 需卖股对冲Short Call Delta")
+                            elif call_delta_v < 0:
+                                st.markdown(f"  - Call成交减少{call_delta_v:+,.0f} → MM买回Call平仓 → 减少卖股对冲需求")
+                
+                # Gamma Ratio分析
+                if gr_change is not None:
+                    gr_icon = "🔴" if gr_change > 0.05 else ("🟢" if gr_change < -0.05 else "⚪")
+                    st.markdown(f"**{gr_icon} Gamma Ratio (GR)**: {today_gr:.2f} (变化 {gr_change:+.2f})")
+                    st.markdown("GR = Put Gamma / Call Gamma")
+                    if gr_change > 0.05:
+                        st.markdown("GR↑ → Put Gamma增加/主导 → 下跌时MM对冲加速卖压 → **加速下跌**")
+                    elif gr_change < -0.05:
+                        st.markdown("GR↓ → Call Gamma增加/主导 → 上涨时MM对冲加速买压 → **加速上涨**")
+                
+                # Delta Ratio分析
+                if dr_change is not None:
+                    dr_icon = "🟢" if dr_change > 0.1 else ("🔴" if dr_change < -0.1 else "⚪")
+                    st.markdown(f"**{dr_icon} Delta Ratio (DR)**: {today_dr:.2f} (变化 {dr_change:+.2f})")
+                    st.markdown("DR = Put Delta / Call Delta (负值，越负越偏空)")
+                    if dr_change > 0.1:
+                        st.markdown("DR↑(更正) → Call Delta占比增加 → MM需买股对冲 → **买压增加**")
+                    elif dr_change < -0.1:
+                        st.markdown("DR↓(更负) → Put Delta占比增加 → MM需卖股对冲 → **卖压增加**")
             
-            # 判断Gamma环境
-            current_price = qqq.get('current')
-            gamma_env = 'positive'
-            if current_price and today_hw:
-                if current_price > today_hw:
-                    gamma_env = 'positive'
-                    st.success(f"**Gamma环境**: 🟢 正Gamma (价格 {current_price:.2f} > Zero Gamma {today_hw:.0f}) - 做空优势")
-                else:
-                    gamma_env = 'negative'
-                    st.error(f"**Gamma环境**: 🔴 负Gamma (价格 {current_price:.2f} < Zero Gamma {today_hw:.0f}) - 做多优势")
+            # ===== 3. Next Exp Vol压力分析 =====
+            ne_vol_result = analyze_next_exp_vol_pressure(csv_data)
+            if ne_vol_result['ne_call_vol'] is not None:
+                st.markdown("### 🎯 Next Exp Vol做市商压力分析")
+                col_ne1, col_ne2, col_ne3 = st.columns(3)
+                with col_ne1:
+                    st.metric("NE Call Vol", f"{ne_vol_result['ne_call_vol']:,.0f}" if ne_vol_result['ne_call_vol'] else "N/A")
+                with col_ne2:
+                    st.metric("NE Put Vol", f"{ne_vol_result['ne_put_vol']:,.0f}" if ne_vol_result['ne_put_vol'] else "N/A")
+                with col_ne3:
+                    diff = ne_vol_result.get('diff_pct')
+                    pressure_icon = "📉" if ne_vol_result['pressure_side'] == 'call_pressure' else ("📈" if ne_vol_result['pressure_side'] == 'put_pressure' else "⚖️")
+                    st.metric("Call-Put差值%", f"{diff:+.1f}%" if diff is not None else "N/A")
+                
+                if ne_vol_result['analysis']:
+                    for line in ne_vol_result['analysis'].split('\n'):
+                        st.markdown(line)
             
-            # 匹配组合信号
+            # ===== 4. Options Impact =====
+            if today_options_impact is not None:
+                st.markdown("### 🏷️ Options Impact")
+                oi_icon = "🔴" if today_options_impact > 50 else ("🟡" if today_options_impact > 20 else "🟢")
+                st.metric("Options Impact", f"{today_options_impact:.1f}%")
+                st.markdown(f"{oi_icon} **解读**: Options Impact衡量期权流对股价的影响程度。"
+                           f"{'高Impact(>50%): 期权flow主导股价波动，基本面让位于期权结构' if today_options_impact > 50 else ('中Impact(20-50%): 期权flow有一定影响' if today_options_impact > 20 else '低Impact(<20%): 基本面主导，期权结构影响有限')}")
+            
+            # ===== 5. NE Skew 三日变化 (额外标注，不做信号) =====
+            st.markdown("### 📊 NE Skew 变化趋势 (近三日)")
+            st.caption("⚠️ 仅供参考，不参与信号产生逻辑")
+            
+            ne_skew_rows = []
+            for i, (label, data_src) in enumerate([('T (今日)', csv_data), ('T-1', csv_data_prev), ('T-2', csv_data_prev2)]):
+                if data_src:
+                    ne_r = data_src.get('NE Skew') or data_src.get('Next Exp Skew')
+                    ne_v = None
+                    if ne_r is not None:
+                        ne_v = parse_number_safe(str(ne_r).replace('%', ''))
+                        if ne_v is not None:
+                            ne_v = ne_v * 100 if abs(ne_v) <= 1 else ne_v
+                    d_val = data_src.get('Date', label)
+                    if hasattr(d_val, 'strftime'):
+                        d_val = d_val.strftime('%Y-%m-%d')
+                    ne_skew_rows.append({'': label, '日期': d_val, 'NE Skew': f"{ne_v:.2f}%" if ne_v is not None else "N/A"})
+            
+            if ne_skew_rows:
+                st.dataframe(pd.DataFrame(ne_skew_rows), hide_index=True, use_container_width=True)
+                
+                # NE Skew T vs T-1变化解读
+                if today_ne_skew is not None and prev_ne_skew is not None:
+                    ne_chg = today_ne_skew - prev_ne_skew
+                    st.markdown(f"**NE Skew变化 (T vs T-1)**: {ne_chg:+.2f}%")
+                    if ne_chg < -5:
+                        st.markdown("NE Skew大幅下降 → 市场恐慌加剧，Put需求急升 → 短期可能继续下跌")
+                    elif ne_chg > 5:
+                        st.markdown("NE Skew大幅回升 → 恐慌消退，Put需求减少 → 短期企稳或反弹")
+                    else:
+                        st.markdown("NE Skew变化温和 → 市场情绪相对稳定")
+            
+            # ===== 6. DPI数据变化 (额外标注，不做信号) =====
+            st.markdown("### 🏦 DPI/暗池数据变化趋势 (近三日)")
+            st.caption("⚠️ 仅供参考，不参与信号产生逻辑")
+            
+            dpi_rows = []
+            for i, (label, data_src) in enumerate([('T (今日)', csv_data), ('T-1', csv_data_prev), ('T-2', csv_data_prev2)]):
+                if data_src:
+                    d_dpi = parse_number_safe(str(data_src.get('DPI', '')))
+                    if d_dpi is not None and d_dpi <= 1:
+                        d_dpi = d_dpi * 100
+                    
+                    d_dpi_vol = parse_number_safe(str(data_src.get('%DPI Volume', '') or data_src.get('% DPI Volume', '')))
+                    if d_dpi_vol is not None and 0 <= d_dpi_vol <= 1:
+                        d_dpi_vol = d_dpi_vol * 100
+                    
+                    d_5dpi = None
+                    for col_name in data_src.keys():
+                        if '5' in str(col_name) and 'DPI' in str(col_name).upper():
+                            d_5dpi = parse_number_safe(str(data_src.get(col_name, '')).replace('%', ''))
+                            break
+                    if d_5dpi is not None and d_5dpi <= 1:
+                        d_5dpi = d_5dpi * 100
+                    
+                    d_val = data_src.get('Date', label)
+                    if hasattr(d_val, 'strftime'):
+                        d_val = d_val.strftime('%Y-%m-%d')
+                    
+                    dpi_rows.append({
+                        '': label,
+                        '日期': d_val,
+                        'DPI': f"{d_dpi:.1f}%" if d_dpi is not None else "N/A",
+                        '%DPI Volume': f"{d_dpi_vol:.1f}%" if d_dpi_vol is not None else "N/A",
+                        '5Day DPI': f"{d_5dpi:.1f}%" if d_5dpi is not None else "N/A"
+                    })
+            
+            if dpi_rows:
+                st.dataframe(pd.DataFrame(dpi_rows), hide_index=True, use_container_width=True)
+                
+                # DPI T vs T-1变化解读
+                if today_dpi is not None and prev_dpi is not None:
+                    dpi_chg = today_dpi - prev_dpi
+                    st.markdown(f"**DPI变化 (T vs T-1)**: {dpi_chg:+.1f}%")
+                    if dpi_chg > 3:
+                        st.markdown("DPI大幅上升 → 机构暗池买盘增加，看涨倾向增强")
+                    elif dpi_chg < -3:
+                        st.markdown("DPI大幅下降 → 机构暗池买盘减少/卖盘增加")
+            
+            st.divider()
+            
+            # ===== 7. 信号产生 (新VR分类框架 + 传统A-I框架) =====
+            st.subheader("🎯 信号产生")
+            
+            # 新VR分类信号
+            vr_signal = classify_vr_change(
+                vr_change, gr_change, dr_change,
+                today_put_vol, prev_put_vol, today_call_vol, prev_call_vol
+            )
+            
+            # 传统A-I组合信号
             combo_signals = []
             if vr_change is not None or gr_change is not None or dr_change is not None:
                 combo_signals = match_combo_signals(gamma_env, vr_change, gr_change, dr_change)
             
-            if combo_signals:
-                st.markdown("### 🎯 匹配的组合信号")
+            # Step 4: 叠加Gamma环境
+            has_any_signal = (vr_signal['type'] is not None and vr_signal['direction'] is not None) or len(combo_signals) > 0
+            
+            if vr_signal['type'] and vr_signal['direction']:
+                sig_color = "#00cc66" if vr_signal['direction'] == 'bullish' else "#ff4b4b"
+                sig_icon = "🚀" if vr_signal['direction'] == 'bullish' else "💀"
+                dir_cn = "做多" if vr_signal['direction'] == 'bullish' else "做空"
+                gamma_label = "正Gamma(信号压缩,快进快出)" if gamma_env == 'positive' else "负Gamma(信号放大)"
                 
+                st.markdown(f"""
+                <div style="border-left: 4px solid {sig_color}; padding: 10px; margin: 10px 0; background-color: rgba(0,0,0,0.05);">
+                <h4>{sig_icon} {vr_signal['type']}类信号 - {dir_cn} | {gamma_label}</h4>
+                <p><b>Step 3 VR驱动分类</b>: {vr_signal['reason']}</p>
+                <p><b>Step 4 MM对冲行为</b>: {vr_signal['mm_analysis']}</p>
+                <p><b>Step 4 Gamma叠加</b>: {'负Gamma → 信号方向被放大，趋势延续性强' if gamma_env == 'negative' else '正Gamma → 信号幅度被压缩，做市商抑制波动，快进快出'}</p>
+                </div>
+                """, unsafe_allow_html=True)
+            elif vr_signal['type'] == 'B_rejected':
+                st.warning(f"⚠️ {vr_signal['reason']}")
+                st.caption(vr_signal['mm_analysis'])
+            
+            # 传统A-I信号（作为辅助确认）
+            if combo_signals:
+                st.markdown("**🔗 A-I框架辅助确认:**")
                 for sig in combo_signals:
-                    sig_color = "#00cc66" if sig['direction'] == 'bullish' else "#ff4b4b"
-                    sig_icon = "🚀" if sig['direction'] == 'bullish' else "💀"
-                    
+                    sig_color2 = "#00cc66" if sig['direction'] == 'bullish' else "#ff4b4b"
+                    sig_icon2 = "🚀" if sig['direction'] == 'bullish' else "💀"
                     st.markdown(f"""
-                    <div style="border-left: 4px solid {sig_color}; padding: 10px; margin: 10px 0; background-color: rgba(0,0,0,0.05);">
-                    <h4>{sig_icon} {sig['name']} - {sig['direction_cn']} (准确率 {sig['accuracy']}%)</h4>
-                    <p><b>条件</b>: {sig['conditions']}</p>
-                    <p><b>MM逻辑</b>: {sig['mm_logic']}</p>
+                    <div style="border-left: 3px solid {sig_color2}; padding: 8px; margin: 5px 0; background-color: rgba(0,0,0,0.02);">
+                    {sig_icon2} <b>{sig['name']}</b> - {sig['direction_cn']} (准确率 {sig['accuracy']}%) | {sig['conditions']}
                     </div>
                     """, unsafe_allow_html=True)
-                
-                # 获取QQQ技术面确认
-                st.markdown("### 📈 技术面确认 (WT + RSI)")
-                try:
-                    ticker = yf.Ticker("QQQ")
-                    hist = ticker.history(period="3mo")
-                    if not hist.empty:
-                        # 计算WaveTrend
-                        hlc3 = (hist['High'] + hist['Low'] + hist['Close']) / 3
-                        esa = hlc3.ewm(span=10).mean()
-                        d = (hlc3 - esa).abs().ewm(span=10).mean()
-                        ci = (hlc3 - esa) / (0.015 * d)
-                        wt1 = ci.ewm(span=21).mean()
-                        wt2 = wt1.rolling(4).mean()
-                        
-                        # RSI
-                        delta = hist['Close'].diff()
-                        gain = delta.where(delta > 0, 0).rolling(14).mean()
-                        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-                        rs = gain / loss
-                        rsi = 100 - (100 / (1 + rs))
-                        
-                        latest_wt1 = float(wt1.iloc[-1])
-                        latest_rsi = float(rsi.iloc[-1])
-                        wt_dir = '↑' if wt1.iloc[-1] > wt1.iloc[-2] else '↓'
-                        
-                        col_tech1, col_tech2, col_tech3 = st.columns(3)
-                        with col_tech1:
-                            wt_status = "超卖" if latest_wt1 <= -60 else ("超买" if latest_wt1 >= 60 else "中性")
-                            st.metric("WaveTrend", f"{latest_wt1:.1f} ({wt_status})")
-                        with col_tech2:
-                            st.metric("WT方向", f"{wt_dir}")
-                        with col_tech3:
-                            rsi_status = "超卖" if latest_rsi < 30 else ("超买" if latest_rsi > 70 else "中性")
-                            st.metric("RSI", f"{latest_rsi:.0f} ({rsi_status})")
-                        
-                        # 技术确认
-                        for sig in combo_signals:
-                            tech_confirm = get_tech_confirmation_for_signal(
-                                sig['direction'], latest_wt1, wt_dir, latest_rsi
-                            )
-                            if tech_confirm['conflict']:
-                                st.warning(f"⚠️ {sig['name']} 技术面冲突: {tech_confirm['reason']}")
-                            elif '✅' in tech_confirm['status']:
-                                st.success(f"✅ {sig['name']} 技术确认: {tech_confirm['reason']}")
-                            else:
-                                st.info(f"➖ {sig['name']} 待确认: {tech_confirm['reason']}")
-                except Exception as e:
-                    st.warning(f"获取技术指标失败: {e}")
             
-            else:
-                # 无组合信号时显示当前状态
-                st.info("📊 当前无匹配的组合信号")
-                
-                # 显示当前VR/GR/DR状态
+            if not has_any_signal:
+                st.info("📊 当前无匹配的信号，观望等待")
                 if vr_change is not None:
                     st.markdown("**当前指标状态:**")
                     status_items = []
-                    if vr_change < -0.1:
-                        status_items.append("✅ VR↓ (满足做空条件)")
-                    elif vr_change > 0.1:
-                        status_items.append("✅ VR↑ (满足做多条件)")
+                    if vr_change < -0.05:
+                        status_items.append(f"VR↓{vr_change:+.2f} (但未满足分类条件)")
+                    elif vr_change > 0.05:
+                        status_items.append(f"VR↑{vr_change:+.2f} (但未满足分类条件)")
                     else:
-                        status_items.append(f"⚪ VR变化 {vr_change:+.2f} (阈值±0.1)")
-                    
-                    if gr_change is not None:
-                        if gr_change > 0.05:
-                            status_items.append("✅ GR↑ (Put Gamma增加)")
-                        elif gr_change < -0.05:
-                            status_items.append("✅ GR↓ (Call Gamma增加)")
-                        else:
-                            status_items.append(f"⚪ GR变化 {gr_change:+.2f} (阈值±0.05)")
-                    
-                    if dr_change is not None:
-                        if dr_change < -0.1:
-                            status_items.append("✅ DR↓ (Put Delta增加)")
-                        elif dr_change > 0.1:
-                            status_items.append("✅ DR↑ (Call Delta增加)")
-                        else:
-                            status_items.append(f"⚪ DR变化 {dr_change:+.2f} (阈值±0.1)")
-                    
+                        status_items.append(f"VR变化 {vr_change:+.2f} (不显著)")
                     for item in status_items:
                         st.markdown(f"• {item}")
+            
+            # Step 5: 技术面确认
+            st.markdown("### 📈 技术面确认 (WT + RSI)")
+            try:
+                ticker = yf.Ticker("QQQ")
+                hist = ticker.history(period="3mo")
+                if not hist.empty:
+                    hlc3 = (hist['High'] + hist['Low'] + hist['Close']) / 3
+                    esa = hlc3.ewm(span=10).mean()
+                    d = (hlc3 - esa).abs().ewm(span=10).mean()
+                    ci = (hlc3 - esa) / (0.015 * d)
+                    wt1 = ci.ewm(span=21).mean()
+                    wt2 = wt1.rolling(4).mean()
                     
-                    st.caption("💡 需要VR+GR或VR+DR组合满足条件才能产生信号")
+                    delta_c = hist['Close'].diff()
+                    gain = delta_c.where(delta_c > 0, 0).rolling(14).mean()
+                    loss = (-delta_c.where(delta_c < 0, 0)).rolling(14).mean()
+                    rs = gain / loss
+                    rsi = 100 - (100 / (1 + rs))
+                    
+                    latest_wt1 = float(wt1.iloc[-1])
+                    latest_rsi = float(rsi.iloc[-1])
+                    wt_dir = '↑' if wt1.iloc[-1] > wt1.iloc[-2] else '↓'
+                    
+                    col_tech1, col_tech2, col_tech3 = st.columns(3)
+                    with col_tech1:
+                        wt_status = "超卖" if latest_wt1 <= -60 else ("超买" if latest_wt1 >= 60 else "中性")
+                        st.metric("WaveTrend", f"{latest_wt1:.1f} ({wt_status})")
+                    with col_tech2:
+                        st.metric("WT方向", f"{wt_dir}")
+                    with col_tech3:
+                        rsi_status = "超卖" if latest_rsi < 30 else ("超买" if latest_rsi > 70 else "中性")
+                        st.metric("RSI", f"{latest_rsi:.0f} ({rsi_status})")
+                    
+                    # 技术确认VR分类信号
+                    if vr_signal['direction']:
+                        tech_confirm = get_tech_confirmation_for_signal(
+                            vr_signal['direction'], latest_wt1, wt_dir, latest_rsi
+                        )
+                        if tech_confirm['conflict']:
+                            st.warning(f"⚠️ {vr_signal['type']}类信号 技术面冲突: {tech_confirm['reason']}")
+                        elif '✅' in tech_confirm['status']:
+                            st.success(f"✅ {vr_signal['type']}类信号 技术确认: {tech_confirm['reason']}")
+                        else:
+                            st.info(f"➖ {vr_signal['type']}类信号 待确认: {tech_confirm['reason']}")
+                    
+                    # 技术确认A-I信号
+                    for sig in combo_signals:
+                        tech_confirm = get_tech_confirmation_for_signal(
+                            sig['direction'], latest_wt1, wt_dir, latest_rsi
+                        )
+                        if tech_confirm['conflict']:
+                            st.warning(f"⚠️ {sig['name']} 技术面冲突: {tech_confirm['reason']}")
+                        elif '✅' in tech_confirm['status']:
+                            st.success(f"✅ {sig['name']} 技术确认: {tech_confirm['reason']}")
+                        else:
+                            st.info(f"➖ {sig['name']} 待确认: {tech_confirm['reason']}")
+            except Exception as e:
+                st.warning(f"获取技术指标失败: {e}")
             
             st.divider()
             
@@ -7907,7 +8314,11 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                             'dpi': dpi,
                             'dpi_vol_pct': dpi_vol_pct,
                             'dpi_5d': dpi_5d,
-                            'ne_skew': ne_skew
+                            'ne_skew': ne_skew,
+                            'put_vol': parse_number_safe(row.get('Put Vol') or row.get('Put Volume')),
+                            'call_vol': parse_number_safe(row.get('Call Vol') or row.get('Call Volume')),
+                            'ne_call_vol': parse_number_safe(row.get('Next Exp Call Vol') or row.get('NE Call Vol')),
+                            'ne_put_vol': parse_number_safe(row.get('Next Exp Put Vol') or row.get('NE Put Vol'))
                         })
                     
                     today_data = pd.DataFrame(parsed_data)
@@ -8013,6 +8424,8 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                             prev_gr = prev.get('gr')
                             prev_vr = prev.get('vr')
                             prev_dpi = prev.get('dpi')
+                            prev_put_vol = prev.get('put_vol')
+                            prev_call_vol = prev.get('call_vol')
                             
                             # 前两天数据 (T-2) 用于先行指标变化
                             prev2 = prev2_data_dict.get(symbol, {})
@@ -8033,8 +8446,28 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                             if price and hw:
                                 gamma_env = 'positive' if price > hw else 'negative'
                             
-                            # 匹配组合信号
+                            # 新VR分类信号
+                            vr_signal = classify_vr_change(
+                                vr_chg, gr_chg, dr_chg,
+                                row.get('put_vol'), prev_put_vol,
+                                row.get('call_vol'), prev_call_vol
+                            )
+                            
+                            # 传统A-I组合信号
                             combo_sigs = match_combo_signals(gamma_env, vr_chg, gr_chg, dr_chg)
+                            
+                            # Next Exp Vol分析
+                            ne_vol_pressure = None
+                            ne_call_v = row.get('ne_call_vol')
+                            ne_put_v = row.get('ne_put_vol')
+                            if ne_call_v and ne_put_v and (ne_call_v + ne_put_v) > 0:
+                                ne_diff = ((ne_call_v - ne_put_v) / (ne_call_v + ne_put_v)) * 100
+                                if ne_diff > 10:
+                                    ne_vol_pressure = 'call_pressure'
+                                elif ne_diff < -10:
+                                    ne_vol_pressure = 'put_pressure'
+                                else:
+                                    ne_vol_pressure = 'balanced'
                             
                             # 获取技术指标
                             tech = get_tech_indicators_elite(symbol)
@@ -8059,11 +8492,16 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                 'DPI_5d': dpi_5d,
                                 'NE_Skew': ne_skew,
                                 'NE_Skew_Chg': ne_skew_chg,  # T vs T-2
+                                'OI': row.get('oi'),
+                                'NE_Call_Vol': ne_call_v,
+                                'NE_Put_Vol': ne_put_v,
+                                'NE_Vol_Pressure': ne_vol_pressure,
+                                'VR_Signal': vr_signal,
                                 'WT1': tech.get('WT1') if tech else None,
                                 'WT_Dir': tech.get('WT_Dir') if tech else None,
                                 'WT_Status': tech.get('WT_Status') if tech else None,
                                 'RSI': tech.get('RSI') if tech else None,
-                                'Has_Signal': len(combo_sigs) > 0,
+                                'Has_Signal': len(combo_sigs) > 0 or (vr_signal['type'] is not None and vr_signal['direction'] is not None),
                                 'Signals': combo_sigs,
                                 'Prev_DPI_History': prev_dpi_dict.get(symbol, []),
                                 'Indicator_History': indicator_history_dict.get(symbol, [])
@@ -8071,7 +8509,43 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                             
                             all_stocks_data.append(stock_info)
                             
-                            # 同时记录有信号的股票
+                            # 记录VR分类信号
+                            if vr_signal['type'] and vr_signal['direction']:
+                                tech_confirm_vr = {'status': '➖', 'bonus': 0, 'reason': ''}
+                                if tech:
+                                    tech_confirm_vr = get_tech_confirmation_for_signal(
+                                        vr_signal['direction'],
+                                        tech.get('WT1'),
+                                        tech.get('WT_Dir'),
+                                        tech.get('RSI')
+                                    )
+                                vr_dir_cn = '做多' if vr_signal['direction'] == 'bullish' else '做空'
+                                signals_list.append({
+                                    'Symbol': symbol,
+                                    'Price': price,
+                                    'Gamma_Env': '正' if gamma_env == 'positive' else '负',
+                                    'Signal': f"{vr_signal['type']}类",
+                                    'Direction': vr_dir_cn,
+                                    'Accuracy': 100 if vr_signal['type'] in ['A', 'C', 'D'] else 80,
+                                    'Conditions': vr_signal['reason'][:80],
+                                    'MM_Logic': vr_signal['mm_analysis'][:80],
+                                    'Strength': vr_signal['strength'],
+                                    'VR_Chg': vr_chg,
+                                    'GR_Chg': gr_chg,
+                                    'DR_Chg': dr_chg,
+                                    'Tech_Confirm': tech_confirm_vr['status'],
+                                    'Tech_Reason': tech_confirm_vr['reason'],
+                                    'Tech_Bonus': tech_confirm_vr['bonus'],
+                                    'Final_Strength': vr_signal['strength'] + tech_confirm_vr['bonus'],
+                                    'WT1': tech.get('WT1') if tech else None,
+                                    'RSI': tech.get('RSI') if tech else None,
+                                    'DPI': dpi,
+                                    'DPI_5d': dpi_5d,
+                                    'NE_Skew': ne_skew,
+                                    'OI': row.get('oi')
+                                })
+                            
+                            # 同时记录A-I组合信号
                             for sig in combo_sigs:
                                 tech_confirm = {'status': '➖', 'bonus': 0, 'reason': ''}
                                 if tech:
@@ -8134,8 +8608,10 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                         # 信号表格
                         if signals_list:
                             display_cols = ['Symbol', 'Direction', 'Signal', 'Accuracy', 'Final_Strength', 
-                                          'Tech_Confirm', 'Conditions']
-                            st.dataframe(signals_df[display_cols], hide_index=True, use_container_width=True)
+                                          'Tech_Confirm', 'OI', 'Conditions']
+                            # 过滤存在的列
+                            signals_df_cols = [c for c in display_cols if c in signals_df.columns]
+                            st.dataframe(signals_df[signals_df_cols], hide_index=True, use_container_width=True)
                         
                         # ========== 所有20只股票详细展示 ==========
                         st.divider()
@@ -8179,8 +8655,12 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                             key="elite20_filter"
                         )
                         
-                        # 按信号状态排序（有信号的在前）
-                        sorted_stocks = sorted(all_stocks_data, key=lambda x: (not x['Has_Signal'], x['Symbol']))
+                        # 按信号状态排序（有信号的在前，VR信号强度优先）
+                        sorted_stocks = sorted(all_stocks_data, key=lambda x: (
+                            not x['Has_Signal'], 
+                            -(x.get('VR_Signal', {}).get('strength', 0)),
+                            x['Symbol']
+                        ))
                         
                         if filter_option == "有信号":
                             sorted_stocks = [s for s in sorted_stocks if s['Has_Signal']]
@@ -8217,16 +8697,39 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                     gamma_changed = True
                             
                             # 确定边框颜色
-                            if has_sig:
-                                sigs = stock['Signals']
-                                is_bullish = any(s['direction'] == 'bullish' for s in sigs)
+                            vr_sig = stock.get('VR_Signal', {})
+                            vr_has_signal = vr_sig.get('type') is not None and vr_sig.get('direction') is not None
+                            
+                            if has_sig or vr_has_signal:
+                                # 优先使用VR信号方向
+                                if vr_has_signal:
+                                    is_bullish = vr_sig['direction'] == 'bullish'
+                                else:
+                                    sigs = stock['Signals']
+                                    is_bullish = any(s['direction'] == 'bullish' for s in sigs)
                                 border_color = "#00cc66" if is_bullish else "#ff4b4b"
                                 sig_icon = "🚀" if is_bullish else "💀"
-                                sig_text = ", ".join([s['name'] for s in sigs])
+                                sig_parts = []
+                                if vr_has_signal:
+                                    sig_parts.append(f"{vr_sig['type']}类")
+                                if stock['Signals']:
+                                    sig_parts.extend([s['name'] for s in stock['Signals']])
+                                sig_text = ", ".join(sig_parts)
                             else:
                                 border_color = "#888888"
                                 sig_icon = "➖"
-                                sig_text = "无组合信号"
+                                sig_text = "无信号"
+                            
+                            # Options Impact标注
+                            oi_val = stock.get('OI')
+                            oi_label = ""
+                            if oi_val is not None:
+                                if oi_val > 50:
+                                    oi_label = f" | OI:{oi_val:.0f}%🔴期权主导"
+                                elif oi_val > 20:
+                                    oi_label = f" | OI:{oi_val:.0f}%🟡"
+                                else:
+                                    oi_label = f" | OI:{oi_val:.0f}%🟢基本面主导"
                             
                             # 如果Gamma环境发生变化，标记
                             gamma_alert = ""
@@ -8236,7 +8739,7 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                             with st.container():
                                 st.markdown(f"""
                                 <div style="border-left: 4px solid {border_color}; padding-left: 15px; margin: 10px 0; background-color: rgba(0,0,0,0.02);">
-                                <h4>{sig_icon} {symbol} - {new_gamma_env}Gamma | {sig_text}{gamma_alert}</h4>
+                                <h4>{sig_icon} {symbol} - {new_gamma_env}Gamma | {sig_text}{oi_label}{gamma_alert}</h4>
                                 </div>
                                 """, unsafe_allow_html=True)
                                 
@@ -8375,11 +8878,39 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                         st.markdown(alert)
                                 
                                 # 如果有信号，显示信号详情
-                                if has_sig:
+                                if has_sig or vr_has_signal:
+                                    # VR分类信号
+                                    if vr_has_signal:
+                                        vr_dir_cn = '做多' if vr_sig['direction'] == 'bullish' else '做空'
+                                        vr_color = "#00cc66" if vr_sig['direction'] == 'bullish' else "#ff4b4b"
+                                        gamma_note = '负Gamma→信号放大' if new_gamma_env == '负' else '正Gamma→信号压缩,快进快出'
+                                        st.markdown(f"**{vr_sig['type']}类 {vr_dir_cn}信号** | {gamma_note}")
+                                        st.caption(f"驱动: {vr_sig['reason']}")
+                                        st.caption(f"MM行为: {vr_sig['mm_analysis']}")
+                                    
+                                    # A-I组合信号
                                     for sig in stock['Signals']:
                                         st.markdown(f"**{sig['name']}** ({sig['direction_cn']}) - 准确率 {sig['accuracy']}%")
-                                        st.markdown(f"条件: {sig['conditions']}")
-                                        st.markdown(f"MM逻辑: {sig['mm_logic']}")
+                                        st.caption(f"条件: {sig['conditions']}")
+                                    
+                                    # 技术面确认
+                                    signal_dir = vr_sig['direction'] if vr_has_signal else (stock['Signals'][0]['direction'] if stock['Signals'] else None)
+                                    if signal_dir and stock.get('WT1') is not None:
+                                        tech_c = get_tech_confirmation_for_signal(
+                                            signal_dir, stock['WT1'], stock.get('WT_Dir'), stock.get('RSI')
+                                        )
+                                        if tech_c['conflict']:
+                                            st.warning(f"⚠️ 技术面冲突: {tech_c['reason']}")
+                                        elif '✅' in tech_c['status']:
+                                            st.success(f"✅ 技术确认: {tech_c['reason']}")
+                                        else:
+                                            st.info(f"➖ 待确认: {tech_c['reason']}")
+                                    
+                                    # NE Vol压力
+                                    ne_pressure = stock.get('NE_Vol_Pressure')
+                                    if ne_pressure:
+                                        ne_label = {'call_pressure': '📉MM控制Call(上方压制)', 'put_pressure': '📈MM控制Put(下方支撑)', 'balanced': '⚖️均衡'}
+                                        st.caption(f"NE Vol压力: {ne_label.get(ne_pressure, 'N/A')}")
                                 
                                 st.markdown("---")
                     else:
