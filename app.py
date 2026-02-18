@@ -1621,6 +1621,96 @@ def calculate_ddf_full(put_vol_t, call_vol_t, dr_t, vr_t,
     return result
 
 
+def calculate_dealer_delta_flow(put_vol_t, call_vol_t, dr_t, vr_t, gr_t,
+                                put_vol_t1, call_vol_t1, dr_t1, vr_t1,
+                                price=None, hw=None):
+    """
+    Dealer Delta Flow 三维分析模型
+    DDR = (PutVol × |DR|) / CallVol  →  >1偏空, <1偏多
+    DDF = DDR_T - DDR_T-1  →  >0卖压增加, <0买压增加
+    Magnitude = |PutVol×|DR| - CallVol| × VR  →  对冲冲击规模
+    """
+    result = {
+        'ddr': None, 'ddr_t1': None, 'ddf': None, 'magnitude': None,
+        'mag_pct': None, 'direction': None, 'flow_direction': None,
+        'gamma_env': None, 'gr_accel': None,
+        'ddr_text': '', 'ddf_text': '', 'mag_text': '',
+        'interpretation': '', 'final_action': ''
+    }
+    # DDR_T
+    if put_vol_t is not None and call_vol_t is not None and call_vol_t > 0 and dr_t is not None:
+        ddr = (put_vol_t * abs(dr_t)) / call_vol_t
+        result['ddr'] = ddr
+        if ddr > 1:
+            result['direction'] = 'bearish'
+            result['ddr_text'] = f"DDR={ddr:.3f} > 1 → MM净正Delta → 需卖股对冲 → 偏空"
+        elif ddr < 1:
+            result['direction'] = 'bullish'
+            result['ddr_text'] = f"DDR={ddr:.3f} < 1 → MM净负Delta → 需买股对冲 → 偏多"
+        else:
+            result['direction'] = 'neutral'
+            result['ddr_text'] = f"DDR={ddr:.3f} ≈ 1 → Delta均衡"
+    # DDR_T-1
+    if put_vol_t1 is not None and call_vol_t1 is not None and call_vol_t1 > 0 and dr_t1 is not None:
+        result['ddr_t1'] = (put_vol_t1 * abs(dr_t1)) / call_vol_t1
+    # DDF
+    if result['ddr'] is not None and result['ddr_t1'] is not None:
+        ddf = result['ddr'] - result['ddr_t1']
+        result['ddf'] = ddf
+        if ddf > 0.01:
+            result['flow_direction'] = 'more_bearish'
+            result['ddf_text'] = f"DDF={ddf:+.3f} → 卖股对冲压力↑ (比昨天更空)"
+        elif ddf < -0.01:
+            result['flow_direction'] = 'more_bullish'
+            result['ddf_text'] = f"DDF={ddf:+.3f} → 买股对冲压力↑ (比昨天更多)"
+        else:
+            result['flow_direction'] = 'stable'
+            result['ddf_text'] = f"DDF={ddf:+.3f} → 对冲压力基本不变"
+    # Magnitude
+    if put_vol_t is not None and call_vol_t is not None and dr_t is not None and vr_t is not None:
+        raw = put_vol_t * abs(dr_t) - call_vol_t
+        mag = abs(raw) * vr_t
+        result['magnitude'] = mag
+        total = put_vol_t + call_vol_t
+        if total > 0:
+            mp = mag / total * 100
+            result['mag_pct'] = mp
+            if mp > 50:
+                result['mag_text'] = f"规模={mag:,.0f} ({mp:.0f}%总量) → 极强冲击"
+            elif mp > 20:
+                result['mag_text'] = f"规模={mag:,.0f} ({mp:.0f}%总量) → 中等冲击"
+            else:
+                result['mag_text'] = f"规模={mag:,.0f} ({mp:.0f}%总量) → 温和"
+    # Gamma
+    if price is not None and hw is not None:
+        result['gamma_env'] = 'positive' if price > hw else 'negative'
+    if gr_t is not None:
+        result['gr_accel'] = gr_t
+    # 综合
+    if result['ddr'] is not None:
+        d = result['direction']
+        f = result.get('flow_direction')
+        g = result.get('gamma_env')
+        dir_cn = '偏空(MM卖股)' if d == 'bearish' else ('偏多(MM买股)' if d == 'bullish' else '中性')
+        ge = '正Gamma压缩' if g == 'positive' else ('负Gamma放大' if g == 'negative' else '')
+        gr_e = ''
+        if gr_t is not None:
+            if gr_t > 2 and d == 'bearish': gr_e = ' | GR>2加速下跌'
+            elif gr_t < 0.5 and d == 'bullish': gr_e = ' | GR<0.5加速上涨'
+        result['interpretation'] = f"{dir_cn} | {ge}{gr_e}"
+        if d == 'bearish' and f == 'more_bearish':
+            result['final_action'] = '🔴 强做空: MM卖股+压力增加' + ('+负Gamma放大' if g == 'negative' else ',但正Gamma可能反弹')
+        elif d == 'bullish' and f == 'more_bullish':
+            result['final_action'] = '🟢 强做多: MM买股+压力增加' + ('+负Gamma放大' if g == 'negative' else ',但正Gamma可能回调')
+        elif d == 'bearish' and f == 'more_bullish':
+            result['final_action'] = '⚠️ DDR偏空但DDF转多，观望'
+        elif d == 'bullish' and f == 'more_bearish':
+            result['final_action'] = '⚠️ DDR偏多但DDF转空，观望'
+        elif f == 'stable':
+            result['final_action'] = ('🔴 偏空(压力稳定)' if d == 'bearish' else '🟢 偏多(压力稳定)') + (' +负Gamma' if g == 'negative' else '')
+    return result
+
+
 # ============================================================
 # VR变化驱动分类 (A/B/C/D类信号) + Call Volume / Put Volume
 # ============================================================
