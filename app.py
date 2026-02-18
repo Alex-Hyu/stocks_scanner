@@ -8628,6 +8628,65 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                         with col_stat4:
                             st.metric("➖ 无信号", no_signal_count)
                         
+                        # ========== 🏦 DDF 四大交易信号面板 ==========
+                        ddf_signal_stocks = [s for s in all_stocks_data if s.get('DDF', {}).get('signal_name')]
+                        
+                        if ddf_signal_stocks:
+                            st.divider()
+                            st.subheader(f"🏦 DDF交易信号 ({len(ddf_signal_stocks)}只)")
+                            st.caption("⏰ 最佳执行窗口 9:45-10:45 | ❌ 1hr未按方向运动则平仓 | ⚠️ DPI连续3天反向则降仓")
+                            
+                            for stock in ddf_signal_stocks:
+                                ddf = stock['DDF']
+                                sym = stock['Symbol']
+                                sig_name = ddf['signal_name']
+                                sig_icon = ddf['signal_icon']
+                                is_short = '做空' in ddf.get('signal_detail', '')
+                                border = "#ff4b4b" if is_short else "#00cc66"
+                                bg = "rgba(255,75,75,0.05)" if is_short else "rgba(0,204,102,0.05)"
+                                
+                                # Gamma环境
+                                gamma = stock.get('Gamma_Env', '?')
+                                
+                                st.markdown(f"""
+                                <div style="border: 2px solid {border}; border-radius: 12px; padding: 16px; margin: 8px 0; background: {bg};">
+                                <h3 style="margin:0 0 8px 0;">{sig_icon} {sym} — {sig_name} | {gamma}Gamma</h3>
+                                <p style="margin:4px 0;">{ddf.get('signal_detail', '')}</p>
+                                </div>
+                                """, unsafe_allow_html=True)
+                                
+                                # 三维度 + 关键位
+                                c1, c2, c3, c4, c5 = st.columns(5)
+                                with c1:
+                                    ddr_v = ddf['ddr']
+                                    ddr_ic = "🔴" if ddr_v > 1.2 else ("🟢" if ddr_v < 0.8 else "⚪")
+                                    st.metric("DDR", f"{ddr_ic}{ddr_v:.3f}", delta=f"T-1:{ddf['ddr_t1']:.3f}" if ddf.get('ddr_t1') else None)
+                                with c2:
+                                    ddf_v = ddf.get('ddf')
+                                    st.metric("DDF", f"{ddf_v:+.3f}" if ddf_v is not None else "N/A")
+                                with c3:
+                                    mp = ddf.get('mag_pct')
+                                    mp_s = ddf.get('mag_stk_pct')
+                                    st.metric("Mag", f"{mp:.1f}%" if mp else "N/A", delta=f"股票量{mp_s:.1f}%" if mp_s else None)
+                                with c4:
+                                    price = stock.get('Price')
+                                    hw = stock.get('HW')
+                                    st.metric("Price", f"${price:.2f}" if price else "N/A", delta=f"HW:{hw:.0f}" if hw else None)
+                                with c5:
+                                    cw = stock.get('CW')
+                                    pw = stock.get('PW')
+                                    st.metric("CW/PW", f"{cw:.0f}/{pw:.0f}" if cw and pw else "N/A")
+                            
+                            st.divider()
+                        else:
+                            # 没有DDF信号时也提示
+                            has_ddf_data = any(s.get('DDF', {}).get('ddr') is not None for s in all_stocks_data)
+                            has_ddf_flow = any(s.get('DDF', {}).get('ddf') is not None for s in all_stocks_data)
+                            if has_ddf_data and not has_ddf_flow:
+                                st.info("🏦 DDF模型: 有DDR数据但缺T-1数据(无法计算DDF)，上传第二天CSV后四大信号将自动触发")
+                            elif has_ddf_data:
+                                st.info("🏦 DDF模型: 今日无四大信号触发（条件不满足）")
+                        
                         # 信号表格
                         if signals_list:
                             display_cols = ['Symbol', 'Direction', 'Signal', 'Accuracy', 'Final_Strength', 
