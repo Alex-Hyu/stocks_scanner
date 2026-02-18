@@ -1690,27 +1690,37 @@ def calculate_dealer_delta_flow(put_vol_t, call_vol_t, dr_t, vr_t, gr_t,
             result['flow_direction'] = 'stable'
             result['ddf_text'] = f"DDF={ddf:+.3f} ∈[-0.15,+0.15] 对冲压力无显著变化"
     
-    # === Magnitude (用Stock Volume做分母) ===
+    # === Magnitude (双分母: 期权总量判断信号 + 股票成交量判断冲击) ===
     if put_vol_t is not None and call_vol_t is not None and dr_t is not None and vr_t is not None:
         raw_delta = put_vol_t * abs(dr_t) - call_vol_t
-        hedge_shares = abs(raw_delta) * vr_t  # MM需要买卖的股数近似
-        result['magnitude'] = hedge_shares
+        hedge_units = abs(raw_delta) * vr_t  # 对冲单位（加权合约数）
+        result['magnitude'] = hedge_units
         
-        # 优先用Stock Volume，否则fallback到期权总量
-        denom = stock_vol if (stock_vol is not None and stock_vol > 0) else (put_vol_t + call_vol_t)
-        denom_label = "股票成交量" if (stock_vol is not None and stock_vol > 0) else "期权总量"
+        # 期权总量占比 (用于信号判断 - 衡量期权市场内部失衡)
+        opt_total = put_vol_t + call_vol_t
+        if opt_total > 0:
+            mp_opt = hedge_units / opt_total * 100
+            result['mag_pct'] = mp_opt  # 信号判断用这个
         
-        if denom > 0:
-            mp = hedge_shares / denom * 100
-            result['mag_pct'] = mp
-            if mp > 10:
-                result['mag_text'] = f"Mag={mp:.1f}%{denom_label} → 🔴高确定性: MM对冲流接管盘面"
-            elif mp > 5:
-                result['mag_text'] = f"Mag={mp:.1f}%{denom_label} → 🟡中等: MM对冲有影响但可被干扰"
-            elif mp > 3:
-                result['mag_text'] = f"Mag={mp:.1f}%{denom_label} → ⚪低确定性: 轻仓,易被波动干扰"
-            else:
-                result['mag_text'] = f"Mag={mp:.1f}%{denom_label} → 噪音级别,忽略"
+        # 股票成交量占比 (衡量对股价的实际冲击)
+        if stock_vol is not None and stock_vol > 0:
+            mp_stk = hedge_units / stock_vol * 100
+            result['mag_stk_pct'] = mp_stk
+        
+        mp = result.get('mag_pct', 0) or 0
+        mp_s = result.get('mag_stk_pct')
+        stk_str = f" | 占股票成交量{mp_s:.1f}%" if mp_s is not None else ""
+        
+        if mp > 30:
+            result['mag_text'] = f"Mag={mp:.1f}%期权量{stk_str} → 🔴极高: MM对冲主导盘面"
+        elif mp > 10:
+            result['mag_text'] = f"Mag={mp:.1f}%期权量{stk_str} → 🟡高确定性: MM对冲流显著"
+        elif mp > 5:
+            result['mag_text'] = f"Mag={mp:.1f}%期权量{stk_str} → 中等: 有影响但可被干扰"
+        elif mp > 3:
+            result['mag_text'] = f"Mag={mp:.1f}%期权量{stk_str} → 低: 轻仓"
+        else:
+            result['mag_text'] = f"Mag={mp:.1f}%期权量{stk_str} → 噪音"
     
     # === Gamma环境 ===
     if price is not None and hw is not None:
@@ -1738,18 +1748,18 @@ def calculate_dealer_delta_flow(put_vol_t, call_vol_t, dr_t, vr_t, gr_t,
         # === 四大交易信号匹配 ===
         if ddf_v is not None:
             # 信号1: 绝地反击 V-Reversal (负Gamma + DDR偏空 + DDF强买)
-            if g == 'negative' and ddr_v > 1.5 and ddf_v < -0.3 and mp > 8:
+            if g == 'negative' and ddr_v > 1.5 and ddf_v < -0.3 and mp > 10:
                 result['signal_name'] = '绝地反击'
                 result['signal_icon'] = '⚡'
-                strength = '极强' if (ddf_v < -0.7 and mp > 12) else '强'
+                strength = '极强' if (ddf_v < -0.7 and mp > 30) else '强'
                 result['signal_detail'] = f"[{strength}做多] 空头结构反转: DDR={ddr_v:.2f}偏空但DDF={ddf_v:+.2f}强买+Mag={mp:.1f}%高确定 → 开盘下砸企稳后做多，目标Put Wall/Zero Gamma"
                 result['final_action'] = f"⚡ 绝地反击({strength}做多): MM被迫大量买股回补空头"
             
             # 信号2: 瀑布杀跌 Waterfall (负Gamma + DDR偏空 + DDF强卖)
-            elif g == 'negative' and ddr_v > 1.2 and ddf_v > 0.3 and mp > 10:
+            elif g == 'negative' and ddr_v > 1.2 and ddf_v > 0.3 and mp > 15:
                 result['signal_name'] = '瀑布杀跌'
                 result['signal_icon'] = '🌊'
-                strength = '极强' if (ddf_v > 0.5 and mp > 15) else '强'
+                strength = '极强' if (ddf_v > 0.5 and mp > 30) else '强'
                 result['signal_detail'] = f"[{strength}做空] 多重卖压共振: DDR={ddr_v:.2f}偏空+DDF={ddf_v:+.2f}卖压增+Mag={mp:.1f}%+负Gamma放大 → 跌破前15min低点后做空"
                 result['final_action'] = f"🌊 瀑布杀跌({strength}做空): 负Gamma+MM顺势砸盘"
             
@@ -1761,12 +1771,12 @@ def calculate_dealer_delta_flow(put_vol_t, call_vol_t, dr_t, vr_t, gr_t,
                 if ddf_v > 0.15 or ddf_pct > 20:
                     result['signal_name'] = '高位诱多'
                     result['signal_icon'] = '🪤'
-                    strength = '强' if (ddf_v > 0.3 or ddf_pct > 50) and mp > 8 else '中等'
+                    strength = '强' if (ddf_v > 0.3 or ddf_pct > 50) and mp > 15 else '中等'
                     result['signal_detail'] = f"[{strength}做空] 正Gamma压制+买盘撤退: DDR={ddr_v:.3f}偏多但DDF={ddf_v:+.3f}({ddf_pct:+.0f}%)转卖+Mag={mp:.1f}% → Call Wall附近做空，目标回踩HW"
                     result['final_action'] = f"🪤 高位诱多({strength}做空): 正Gamma+MM卸载多头"
             
             # 信号4: 慢牛爬坡 Grinding Higher (正Gamma + DDR偏多 + DDF稳买)
-            elif g == 'positive' and ddr_v < 0.8 and ddf_v < 0 and 3 < mp < 8:
+            elif g == 'positive' and ddr_v < 0.8 and ddf_v < 0 and 3 < mp < 20:
                 ddr_t1 = result.get('ddr_t1')
                 ddf_pct = (ddf_v / ddr_t1 * 100) if (ddr_t1 and ddr_t1 > 0) else 0
                 if ddf_v < -0.15 or ddf_pct < -20:
@@ -3941,7 +3951,7 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                 with col_d2:
                     if ddf_result.get('ddf') is not None:
                         ddf_v = ddf_result['ddf']
-                        ddf_ic = "📉卖压↑" if ddf_v > 0.01 else ("📈买压↑" if ddf_v < -0.01 else "➖持平")
+                        ddf_ic = "📉卖压↑" if ddf_v > 0.15 else ("📈买压↑" if ddf_v < -0.15 else "➖持平")
                         st.metric(f"DDF ({ddf_ic})", f"{ddf_v:+.3f}")
                     else:
                         st.metric("DDF (变化)", "无T-1数据")
@@ -3949,7 +3959,10 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                     if ddf_result.get('magnitude') is not None:
                         mag = ddf_result['magnitude']
                         mag_s = f"{mag/1e9:.1f}B" if mag > 1e9 else (f"{mag/1e6:.1f}M" if mag > 1e6 else f"{mag:,.0f}")
-                        st.metric("Magnitude (规模)", mag_s, delta=f"{ddf_result['mag_pct']:.0f}%总量" if ddf_result.get('mag_pct') else None)
+                        mp_opt = ddf_result.get('mag_pct')
+                        mp_stk = ddf_result.get('mag_stk_pct')
+                        delta_str = f"占股票量{mp_stk:.1f}%" if mp_stk is not None else None
+                        st.metric("Magnitude", f"{mp_opt:.1f}%期权量" if mp_opt else mag_s, delta=delta_str)
                 
                 # 详细解读
                 st.info(f"**方向**: {ddf_result['ddr_text']}")
@@ -8927,7 +8940,7 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                             if ddf.get('ddf') is not None:
                                                 ddf_v = ddf['ddf']
                                                 fl_icon = "📉" if ddf_v > 0.01 else ("📈" if ddf_v < -0.01 else "➖")
-                                                fl_text = "卖压↑" if ddf_v > 0.01 else ("买压↑" if ddf_v < -0.01 else "持平")
+                                                fl_text = "卖压↑" if ddf_v > 0.15 else ("买压↑" if ddf_v < -0.15 else "持平")
                                                 st.metric(f"DDF {fl_icon}{fl_text}", f"{ddf_v:+.3f}")
                                             else:
                                                 st.metric("DDF", "无T-1")
@@ -8935,7 +8948,10 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                             if ddf.get('magnitude') is not None:
                                                 mag = ddf['magnitude']
                                                 mag_s = f"{mag/1e9:.1f}B" if mag > 1e9 else (f"{mag/1e6:.1f}M" if mag > 1e6 else f"{mag:,.0f}")
-                                                st.metric("规模", mag_s, delta=f"{ddf['mag_pct']:.0f}%总量" if ddf.get('mag_pct') else None)
+                                                mp_opt = ddf.get('mag_pct')
+                                                mp_stk = ddf.get('mag_stk_pct')
+                                                delta_str = f"占股票量{mp_stk:.1f}%" if mp_stk is not None else None
+                                                st.metric("Magnitude", f"{mp_opt:.1f}%期权量" if mp_opt else mag_s, delta=delta_str)
                                         
                                         # 三维度文字解读
                                         st.info(f"**①方向**: {ddf.get('ddr_text', '')}")
