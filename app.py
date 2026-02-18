@@ -1508,18 +1508,128 @@ def analyze_qqq_nq(premarket_data, csv_data=None):
 
 
 # ============================================================
-# VR变化驱动分类 (A/B/C/D类信号)
-# 使用CSV中的 Call Volume / Put Volume 列
+# Dealer Delta Flow (DDF) 模型
+# ============================================================
+
+def calculate_dealer_delta(put_vol, call_vol, dr, vr):
+    """
+    计算 Dealer Delta Direction (DDR)
+    DDR = (PutVol × |DR|) / CallVol
+    DDR > 1 → MM净正Delta → 需卖股对冲 → 偏空
+    DDR < 1 → MM净负Delta → 需买股对冲 → 偏多
+    """
+    if put_vol is None or call_vol is None or dr is None or call_vol == 0:
+        return None
+    ddr = (put_vol * abs(dr)) / call_vol
+    return ddr
+
+
+def calculate_ddf_full(put_vol_t, call_vol_t, dr_t, vr_t,
+                       put_vol_t1, call_vol_t1, dr_t1, vr_t1,
+                       gamma_env='positive', gr=None):
+    """
+    完整DDF模型: DDR方向 + DeltaFlow变化 + Magnitude压力 + Gamma环境
+    
+    Returns dict with:
+      ddr_t: 今日DDR
+      ddr_t1: 昨日DDR
+      ddf: DeltaFlow (DDR_T - DDR_T-1)
+      magnitude: 对冲压力绝对规模
+      gamma_effect: Gamma环境对DDF的影响
+      direction: 最终对冲方向 ('sell'=MM卖股, 'buy'=MM买股, 'neutral')
+      interpretation: 中文解读
+    """
+    result = {
+        'ddr_t': None, 'ddr_t1': None, 'ddf': None,
+        'magnitude': None, 'gamma_effect': '',
+        'direction': 'neutral', 'interpretation': '',
+        'gr_accel': ''
+    }
+    
+    # DDR_T
+    ddr_t = calculate_dealer_delta(put_vol_t, call_vol_t, dr_t, vr_t)
+    result['ddr_t'] = ddr_t
+    
+    # DDR_T-1
+    ddr_t1 = calculate_dealer_delta(put_vol_t1, call_vol_t1, dr_t1, vr_t1)
+    result['ddr_t1'] = ddr_t1
+    
+    if ddr_t is None:
+        return result
+    
+    # === DDR方向解读 ===
+    if ddr_t > 1:
+        ddr_text = f"DDR={ddr_t:.2f}>1 → MM净正Delta → 需卖股对冲 → 偏空"
+    elif ddr_t < 1:
+        ddr_text = f"DDR={ddr_t:.2f}<1 → MM净负Delta → 需买股对冲 → 偏多"
+    else:
+        ddr_text = f"DDR={ddr_t:.2f}≈1 → 多空均衡"
+    
+    # === DeltaFlow (T vs T-1) ===
+    ddf = None
+    ddf_text = ""
+    if ddr_t1 is not None:
+        ddf = ddr_t - ddr_t1
+        result['ddf'] = ddf
+        if ddf > 0.05:
+            ddf_text = f"DDF={ddf:+.3f} → 卖股压力增加(比T-1更空)"
+        elif ddf < -0.05:
+            ddf_text = f"DDF={ddf:+.3f} → 买股压力增加(比T-1更多)"
+        else:
+            ddf_text = f"DDF={ddf:+.3f} → 对冲压力变化不大"
+    
+    # === Magnitude (对冲压力规模) ===
+    if put_vol_t is not None and call_vol_t is not None and dr_t is not None and vr_t is not None:
+        magnitude = abs(put_vol_t * abs(dr_t) - call_vol_t) * (vr_t if vr_t > 0 else 1)
+        result['magnitude'] = magnitude
+    
+    # === Gamma环境叠加 ===
+    if gamma_env == 'positive':
+        gamma_text = "正Gamma → 对冲行为被压缩(涨卖跌买，自动稳定)"
+    else:
+        gamma_text = "负Gamma → 对冲行为被放大(涨买跌卖，趋势加速)"
+    result['gamma_effect'] = gamma_text
+    
+    # === GR加速度 ===
+    gr_text = ""
+    if gr is not None:
+        if gr > 2:
+            gr_text = f"GR={gr:.2f}>2 → Put Gamma主导，下跌加速"
+        elif gr < 0.5:
+            gr_text = f"GR={gr:.2f}<0.5 → Call Gamma主导，上涨加速"
+        else:
+            gr_text = f"GR={gr:.2f} → Gamma中性"
+    result['gr_accel'] = gr_text
+    
+    # === 综合方向判断 ===
+    if ddr_t > 1:
+        result['direction'] = 'sell'
+        if gamma_env == 'negative':
+            result['interpretation'] = f"⚠️ {ddr_text}; {gamma_text}; 做空优先"
+        else:
+            result['interpretation'] = f"📉 {ddr_text}; {gamma_text}; 短线做空但别追"
+    elif ddr_t < 1:
+        result['direction'] = 'buy'
+        if gamma_env == 'negative':
+            result['interpretation'] = f"🔥 {ddr_text}; {gamma_text}; 做多优先"
+        else:
+            result['interpretation'] = f"📈 {ddr_text}; {gamma_text}; 短线做多但别追"
+    else:
+        result['direction'] = 'neutral'
+        result['interpretation'] = f"⚖️ {ddr_text}; 观望"
+    
+    return result
+
+
+# ============================================================
+# VR变化驱动分类 (A/B/C/D类信号) + Call Volume / Put Volume
 # ============================================================
 
 def classify_vr_change(vr_change, gr_change, dr_change,
                        put_vol_t, put_vol_t1, call_vol_t, call_vol_t1):
     """
     信号框架：基于VR变化驱动分类 (A/B/C/D类)
-    
-    CSV列名: Call Volume (整数如1627783或带K/M如1.2M), Put Volume (同)
-    Step 2: PutΔ = T日Put Vol - T-1日Put Vol; CallΔ同理
-    Step 3: 分类VR变化驱动
+    CSV列名: Call Volume, Put Volume
     """
     result = {
         'type': None, 'direction': None, 'strength': 0,
@@ -1530,10 +1640,8 @@ def classify_vr_change(vr_change, gr_change, dr_change,
     if vr_change is None:
         return result
     
-    # Step 2: 计算 Put/Call Volume 变化
     put_delta = call_delta = put_chg_pct = call_chg_pct = None
     has_vol = False
-    
     if put_vol_t is not None and put_vol_t1 is not None and put_vol_t1 != 0:
         put_delta = put_vol_t - put_vol_t1
         put_chg_pct = (put_delta / abs(put_vol_t1)) * 100
@@ -1542,7 +1650,6 @@ def classify_vr_change(vr_change, gr_change, dr_change,
         call_delta = call_vol_t - call_vol_t1
         call_chg_pct = (call_delta / abs(call_vol_t1)) * 100
         has_vol = True
-    
     result['put_vol_delta'] = put_delta
     result['call_vol_delta'] = call_delta
     result['put_chg_pct'] = put_chg_pct
@@ -1553,57 +1660,52 @@ def classify_vr_change(vr_change, gr_change, dr_change,
     vr_up = vr_change > 0.05
     vr_down = vr_change < -0.05
     
-    # Step 3: 分类
     if vr_up:
         if has_vol and put_delta is not None and call_delta is not None:
             if put_delta > 0 and put_chg_pct is not None and call_chg_pct is not None and put_chg_pct > call_chg_pct:
                 result.update({'type': 'A', 'direction': 'bullish', 'strength': 4,
                     'reason': f"A类做多✓: VR↑{vr_change:+.2f}, Put Vol增{put_delta:+,.0f}({put_chg_pct:+.1f}%) > Call Vol变{call_delta:+,.0f}({call_chg_pct:+.1f}%)",
-                    'mm_analysis': "ATM Put成交增多→MM卖出更多Put(Short Put增加)→需买入标的对冲→买盘推动上涨"})
+                    'mm_analysis': "Put成交增多→MM Short Put增加→需买股对冲→买盘推涨"})
             if result['type'] is None and call_delta < 0:
                 if gr_chg < -0.05:
                     result.update({'type': 'B', 'direction': 'bullish', 'strength': 3,
                         'reason': f"B类做多✓(GR确认): VR↑{vr_change:+.2f}, Call Vol减{call_delta:+,.0f}({call_chg_pct:+.1f}%), GR↓{gr_chg:+.2f}",
-                        'mm_analysis': "Call成交减少为VR上升主因→MM买回Call平仓→减少卖股对冲→GR↓确认"})
+                        'mm_analysis': "Call成交减少→MM买回Call→减少卖股对冲→GR↓确认"})
                 elif gr_chg > 0.05:
                     result.update({'type': 'B_rejected', 'direction': None, 'strength': 0,
-                        'reason': f"B类不操作: VR↑{vr_change:+.2f}但Call Vol减{call_delta:+,.0f}, GR↑{gr_chg:+.2f}不支持",
-                        'mm_analysis': "GR上升=Put Gamma仍主导，VR上升不可靠"})
+                        'reason': f"B类不操作: VR↑{vr_change:+.2f}但Call Vol减, GR↑{gr_chg:+.2f}不支持",
+                        'mm_analysis': "GR上升=Put Gamma仍主导，不可靠"})
         if result['type'] is None:
             if gr_chg < -0.05 or dr_chg > 0.1:
                 result.update({'type': 'A', 'direction': 'bullish', 'strength': 3,
                     'reason': f"A类做多✓: VR↑{vr_change:+.2f}" + (f"+GR↓{gr_chg:+.2f}" if gr_chg < -0.05 else f"+DR↑{dr_chg:+.2f}"),
-                    'mm_analysis': "VR上升=Put比率增加→MM买股对冲→推动上涨"})
+                    'mm_analysis': "VR上升→MM买股对冲→推涨"})
             elif not has_vol:
                 result.update({'type': 'A', 'direction': 'bullish', 'strength': 2,
-                    'reason': f"A类做多(弱): VR↑{vr_change:+.2f}(无T-1 Volume对比)",
-                    'mm_analysis': "VR上升→MM倾向买股，但缺Volume明细确认"})
-    
+                    'reason': f"A类做多(弱): VR↑{vr_change:+.2f}(无T-1 Vol对比)",
+                    'mm_analysis': "VR上升→倾向买股，但缺Volume确认"})
     elif vr_down:
         if has_vol and put_delta is not None and call_delta is not None:
             if put_delta < 0 and put_chg_pct is not None and call_chg_pct is not None and abs(put_chg_pct) > abs(call_chg_pct):
                 result.update({'type': 'C', 'direction': 'bearish', 'strength': 4,
                     'reason': f"C类做空✓: VR↓{vr_change:+.2f}, Put Vol减{put_delta:+,.0f}({put_chg_pct:+.1f}%) > Call Vol变{call_delta:+,.0f}({call_chg_pct:+.1f}%)",
-                    'mm_analysis': "Put成交减少→MM Short Put敞口减少→卖出对冲多头→卖压推动下跌"})
+                    'mm_analysis': "Put成交减少→MM Short Put减少→卖出对冲多头→卖压下跌"})
             if result['type'] is None and call_delta > 0:
                 result.update({'type': 'D', 'direction': 'bearish', 'strength': 5,
                     'reason': f"D类做空✓✓(最强): VR↓{vr_change:+.2f}, Call Vol增{call_delta:+,.0f}({call_chg_pct:+.1f}%)为主驱动",
-                    'mm_analysis': "Call成交增加(分母增大)→MM卖更多Call(Short Call)→需卖标的对冲→最强卖压"})
+                    'mm_analysis': "Call成交增加→MM Short Call增加→需卖股对冲→最强卖压"})
         if result['type'] is None:
             if gr_chg > 0.05 or dr_chg < -0.1:
                 result.update({'type': 'C', 'direction': 'bearish', 'strength': 4,
                     'reason': f"C类做空✓: VR↓{vr_change:+.2f}" + (f"+GR↑{gr_chg:+.2f}" if gr_chg > 0.05 else f"+DR↓{dr_chg:+.2f}"),
-                    'mm_analysis': "VR下降→MM卖股对冲→下跌加速"})
+                    'mm_analysis': "VR下降→MM卖股对冲→下跌"})
             else:
                 result.update({'type': 'C', 'direction': 'bearish', 'strength': 3,
-                    'reason': f"C类做空: VR↓{vr_change:+.2f}(VR下降历史做空100%准确)",
+                    'reason': f"C类做空: VR↓{vr_change:+.2f}(VR下降做空100%准确)",
                     'mm_analysis': "VR下降=MM Short Put减少/Short Call增加→卖股→下跌"})
-    
     return result
 
 
-# ============================================================
-# 组合信号框架 (VR/GR/DR变化 + Gamma环境)
 # ============================================================
 
 def match_combo_signals(gamma_env, vr_change, gr_change, dr_change):
@@ -3549,6 +3651,9 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
             gr_change = (today_gr - prev_gr) if (today_gr is not None and prev_gr is not None) else None
             dr_change = (today_dr - prev_dr) if (today_dr is not None and prev_dr is not None) else None
             
+            # 读取 Call Volume / Put Volume (T 和 T-1)
+            # Call/Put Volume变量（DDF模型已在上方处理）
+            
             # 计算先行指标变化量 (T vs T-2)
             dpi_change_t2 = (today_dpi - prev2_dpi) if (today_dpi is not None and prev2_dpi is not None) else None
             ne_skew_change_t2 = (today_ne_skew - prev2_ne_skew) if (today_ne_skew is not None and prev2_ne_skew is not None) else None
@@ -3572,6 +3677,8 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                 st.metric("Zero Gamma", f"{today_hw:.0f}" if today_hw else "N/A")
             
             # 显示先行指标 (T vs T-2)
+            st.markdown("**⏰ 先行指标 (T vs T-2)**")
+            
             st.markdown("**⏰ 先行指标 (T vs T-2)**")
             if prev2_date_str:
                 st.caption(f"对比: {prev2_date_str} → 今日")
@@ -8003,38 +8110,28 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                             'dpi_vol_pct': dpi_vol_pct,
                             'dpi_5d': dpi_5d,
                             'ne_skew': ne_skew,
-                            # ===== 新增: 信号产生必需字段 =====
                             'call_vol': parse_number_safe(row.get('Call Volume')),
                             'put_vol': parse_number_safe(row.get('Put Volume')),
                             'ne_call_vol': parse_number_safe(row.get('Next Exp Call Vol')),
                             'ne_put_vol': parse_number_safe(row.get('Next Exp Put Vol')),
                             'key_gamma_strike': parse_number_safe(row.get('Key Gamma Strike')),
                             'key_delta_strike': parse_number_safe(row.get('Key Delta Strike')),
-                            'call_gamma': parse_number_safe(row.get('Call Gamma')),
-                            'put_gamma': parse_number_safe(row.get('Put Gamma')),
-                            'next_exp_gamma': parse_number_safe(row.get('Next Exp Gamma')),
-                            'next_exp_delta': parse_number_safe(row.get('Next Exp Delta')),
                             'put_call_oi_ratio': parse_number_safe(row.get('Put/Call OI\xa0Ratio') or row.get('Put/Call OI Ratio')),
-                            'skew': parse_number_safe(row.get('Skew')),
-                            'rv_1m': parse_number_safe(row.get('1 M RV')),
-                            'iv_1m': parse_number_safe(row.get('1 M IV')),
                             'iv_rank': parse_number_safe(row.get('IV Rank')),
                             'options_implied_move': parse_number_safe(row.get('Options Implied Move')),
                             'previous_close': parse_number_safe(row.get('Previous Close')),
-                            'stock_volume': parse_number_safe(row.get('Stock Volume')),
                         })
                     
                     today_data = pd.DataFrame(parsed_data)
                     
-                    # ========== 自动保存到云端（每次上传CSV自动保存所有字段） ==========
+                    # ========== 自动保存到云端（每次上传自动保存所有字段） ==========
                     date_exists = any(v.get('date') == data_date_str for v in elite_history.values())
                     if not date_exists:
                         for _, row in today_data.iterrows():
                             key = f"{data_date_str}_{row['symbol']}"
                             elite_history[key] = row.to_dict()
-                        
                         if save_worksheet_data(ELITE20_DAILY_WS, elite_history):
-                            st.success(f"✅ 已自动保存 {data_date_str} 全部数据到云端 ({len(today_data)} 只股票，含Call/Put Volume等所有列)")
+                            st.success(f"✅ 已自动保存 {data_date_str} 全部数据到云端 ({len(today_data)} 只，含Call/Put Volume)")
                             st.cache_data.clear()
                         else:
                             st.warning("⚠️ 自动保存失败")
@@ -8122,7 +8219,7 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                             call_vol = row.get('call_vol')
                             put_vol = row.get('put_vol')
                             
-                            # 前一天数据 (T-1) - 包含 call_vol/put_vol
+                            # 前一天数据 (T-1) - 含 call_vol/put_vol
                             prev = prev_data_dict.get(symbol, {})
                             prev_dr = prev.get('dr')
                             prev_gr = prev.get('gr')
@@ -8150,14 +8247,20 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                             if price and hw:
                                 gamma_env = 'positive' if price > hw else 'negative'
                             
-                            # ===== 新VR分类信号 (A/B/C/D类) =====
-                            # 使用 Call Volume / Put Volume (T vs T-1)
+                            # ===== VR分类信号 (A/B/C/D类) =====
                             vr_signal = classify_vr_change(
                                 vr_chg, gr_chg, dr_chg,
                                 put_vol, prev_put_vol,
                                 call_vol, prev_call_vol
                             )
                             vr_has_signal = vr_signal['type'] is not None and vr_signal['direction'] is not None
+                            
+                            # ===== Dealer Delta Flow (DDF) =====
+                            ddf_data = calculate_ddf_full(
+                                put_vol, call_vol, dr, vr,
+                                prev_put_vol, prev_call_vol, prev_dr, prev_vr,
+                                gamma_env, gr
+                            )
                             
                             # ===== 传统A-I组合信号 =====
                             combo_sigs = match_combo_signals(gamma_env, vr_chg, gr_chg, dr_chg)
@@ -8184,13 +8287,14 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                 'Prev_Call_Vol': prev_call_vol,
                                 'Prev_Put_Vol': prev_put_vol,
                                 'OI': row.get('oi'),
+                                'VR_Signal': vr_signal,
+                                'DDF': ddf_data,
                                 'DPI': dpi,
                                 'DPI_Vol_Pct': row.get('dpi_vol_pct'),
                                 'DPI_Chg': dpi_chg,
                                 'DPI_5d': dpi_5d,
                                 'NE_Skew': ne_skew,
                                 'NE_Skew_Chg': ne_skew_chg,
-                                'VR_Signal': vr_signal,
                                 'WT1': tech.get('WT1') if tech else None,
                                 'WT_Dir': tech.get('WT_Dir') if tech else None,
                                 'WT_Status': tech.get('WT_Status') if tech else None,
@@ -8202,33 +8306,6 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                             }
                             
                             all_stocks_data.append(stock_info)
-                            
-                            # 记录VR分类信号
-                            if vr_has_signal:
-                                tech_vr = {'status': '➖', 'bonus': 0, 'reason': ''}
-                                if tech:
-                                    tech_vr = get_tech_confirmation_for_signal(
-                                        vr_signal['direction'], tech.get('WT1'), tech.get('WT_Dir'), tech.get('RSI'))
-                                vr_dir_cn = '做多' if vr_signal['direction'] == 'bullish' else '做空'
-                                g_note = '负Gamma放大' if gamma_env == 'negative' else '正Gamma压缩'
-                                signals_list.append({
-                                    'Symbol': symbol, 'Price': price,
-                                    'Gamma_Env': '正' if gamma_env == 'positive' else '负',
-                                    'Signal': f"{vr_signal['type']}类({g_note})",
-                                    'Direction': vr_dir_cn,
-                                    'Accuracy': 100 if vr_signal['type'] in ['A','C','D'] else 80,
-                                    'Conditions': vr_signal['reason'][:120],
-                                    'MM_Logic': vr_signal['mm_analysis'][:100],
-                                    'Strength': vr_signal['strength'],
-                                    'VR_Chg': vr_chg, 'GR_Chg': gr_chg, 'DR_Chg': dr_chg,
-                                    'Tech_Confirm': tech_vr['status'],
-                                    'Tech_Reason': tech_vr['reason'],
-                                    'Tech_Bonus': tech_vr['bonus'],
-                                    'Final_Strength': vr_signal['strength'] + tech_vr['bonus'],
-                                    'WT1': tech.get('WT1') if tech else None,
-                                    'RSI': tech.get('RSI') if tech else None,
-                                    'DPI': dpi, 'DPI_5d': dpi_5d, 'NE_Skew': ne_skew
-                                })
                             
                             # 同时记录有信号的股票
                             for sig in combo_sigs:
@@ -8382,6 +8459,7 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                             # 确定边框颜色
                             vr_sig = stock.get('VR_Signal', {})
                             vr_has_sig = vr_sig.get('type') is not None and vr_sig.get('direction') is not None
+                            ddf = stock.get('DDF', {})
                             
                             if has_sig or vr_has_sig:
                                 if vr_has_sig:
@@ -8401,10 +8479,16 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                 sig_icon = "➖"
                                 sig_text = "无信号"
                             
-                            oi_val = stock.get('OI')
-                            oi_label = ""
-                            if oi_val is not None:
-                                oi_label = f" | OI:{oi_val:.0f}%{'🔴' if oi_val>50 else ('🟡' if oi_val>20 else '🟢')}"
+                            # DDF方向标注
+                            ddf_label = ""
+                            if ddf.get('ddr_t') is not None:
+                                ddr_v = ddf['ddr_t']
+                                if ddr_v > 1:
+                                    ddf_label = f" | DDR:{ddr_v:.2f}🔴MM卖股"
+                                elif ddr_v < 1:
+                                    ddf_label = f" | DDR:{ddr_v:.2f}🟢MM买股"
+                                else:
+                                    ddf_label = f" | DDR:{ddr_v:.2f}⚪均衡"
                             
                             # 如果Gamma环境发生变化，标记
                             gamma_alert = ""
@@ -8414,7 +8498,7 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                             with st.container():
                                 st.markdown(f"""
                                 <div style="border-left: 4px solid {border_color}; padding-left: 15px; margin: 10px 0; background-color: rgba(0,0,0,0.02);">
-                                <h4>{sig_icon} {symbol} - {new_gamma_env}Gamma | {sig_text}{oi_label}{gamma_alert}</h4>
+                                <h4>{sig_icon} {symbol} - {new_gamma_env}Gamma | {sig_text}{ddf_label}{gamma_alert}</h4>
                                 </div>
                                 """, unsafe_allow_html=True)
                                 
@@ -8554,24 +8638,13 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                 
                                 # 如果有信号，显示信号详情
                                 if has_sig or vr_has_sig:
-                                    # VR分类信号详情
+                                    # VR分类信号
                                     if vr_has_sig:
                                         vr_dir_cn = '做多' if vr_sig['direction'] == 'bullish' else '做空'
-                                        g_note = '负Gamma→信号放大' if new_gamma_env == '负' else '正Gamma→信号压缩,快进快出'
+                                        g_note = '负Gamma→信号放大' if new_gamma_env == '负' else '正Gamma→信号压缩'
                                         st.markdown(f"**🎯 {vr_sig['type']}类 {vr_dir_cn}** | {g_note}")
                                         st.caption(f"驱动: {vr_sig['reason']}")
                                         st.caption(f"MM: {vr_sig['mm_analysis']}")
-                                        # 显示Call/Put Vol变化明细
-                                        cv = stock.get('Call_Vol')
-                                        pv = stock.get('Put_Vol')
-                                        pcv = stock.get('Prev_Call_Vol')
-                                        ppv = stock.get('Prev_Put_Vol')
-                                        if cv is not None and pcv is not None:
-                                            cv_chg = cv - pcv
-                                            st.caption(f"Call Vol: {cv:,.0f} (T-1: {pcv:,.0f}, Δ={cv_chg:+,.0f})")
-                                        if pv is not None and ppv is not None:
-                                            pv_chg = pv - ppv
-                                            st.caption(f"Put Vol: {pv:,.0f} (T-1: {ppv:,.0f}, Δ={pv_chg:+,.0f})")
                                     
                                     # A-I组合信号
                                     for sig in stock.get('Signals', []):
@@ -8588,6 +8661,54 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                             st.success(f"✅ 技术确认: {tc['reason']}")
                                         else:
                                             st.info(f"➖ 待确认: {tc['reason']}")
+                                
+                                # DDF做市商对冲方向 (所有股票都显示)
+                                ddf = stock.get('DDF', {})
+                                if ddf.get('ddr') is not None:
+                                    with st.expander("🏦 Dealer Delta Flow", expanded=(has_sig or vr_has_sig)):
+                                        col_d1, col_d2, col_d3 = st.columns(3)
+                                        with col_d1:
+                                            ddr_v = ddf['ddr']
+                                            ddr_icon = "🔴" if ddr_v > 1 else ("🟢" if ddr_v < 1 else "⚪")
+                                            ddr_dir = "MM卖股→偏空" if ddr_v > 1 else ("MM买股→偏多" if ddr_v < 1 else "均衡")
+                                            ddf_delta_str = f"T-1:{ddf['ddr_t1']:.3f}" if ddf.get('ddr_t1') is not None else None
+                                            st.metric(f"DDR {ddr_icon}", f"{ddr_v:.3f}", delta=ddf_delta_str, help=ddr_dir)
+                                        with col_d2:
+                                            if ddf.get('ddf') is not None:
+                                                ddf_v = ddf['ddf']
+                                                fl = "卖压↑" if ddf_v > 0.01 else ("买压↑" if ddf_v < -0.01 else "持平")
+                                                st.metric(f"DDF ({fl})", f"{ddf_v:+.3f}")
+                                            else:
+                                                st.metric("DDF", "无T-1")
+                                        with col_d3:
+                                            if ddf.get('magnitude') is not None:
+                                                mag = ddf['magnitude']
+                                                mag_s = f"{mag/1e9:.1f}B" if mag > 1e9 else (f"{mag/1e6:.1f}M" if mag > 1e6 else f"{mag:,.0f}")
+                                                st.metric("对冲规模", mag_s, delta=f"{ddf['mag_pct']:.0f}%总量" if ddf.get('mag_pct') else None)
+                                        
+                                        # 解读
+                                        st.caption(ddf.get('ddr_text', ''))
+                                        if ddf.get('ddf_text'):
+                                            st.caption(ddf['ddf_text'])
+                                        if ddf.get('mag_text'):
+                                            st.caption(ddf['mag_text'])
+                                        if ddf.get('final_action'):
+                                            st.markdown(f"**{ddf['final_action']}**")
+                                        
+                                        # Volume明细
+                                        cv = stock.get('Call_Vol')
+                                        pv = stock.get('Put_Vol')
+                                        pcv = stock.get('Prev_Call_Vol')
+                                        ppv = stock.get('Prev_Put_Vol')
+                                        vol_parts = []
+                                        if cv is not None:
+                                            vol_parts.append(f"Call Vol: {cv:,.0f}")
+                                        if pv is not None:
+                                            vol_parts.append(f"Put Vol: {pv:,.0f}")
+                                        if vol_parts:
+                                            st.caption("T日: " + " | ".join(vol_parts))
+                                        if pcv is not None and ppv is not None:
+                                            st.caption(f"T-1: Call={pcv:,.0f} Put={ppv:,.0f} | Δ Call={cv-pcv:+,.0f} Put={pv-ppv:+,.0f}" if cv and pv else f"T-1: Call={pcv:,.0f} Put={ppv:,.0f}")
                                 
                                 st.markdown("---")
                     else:
