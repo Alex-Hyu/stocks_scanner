@@ -8200,6 +8200,8 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
         def get_tech_indicators_elite(symbol):
             try:
                 ticker = yf.Ticker(symbol)
+                
+                # Daily timeframe (existing)
                 df = ticker.history(period="3mo")
                 if len(df) < 50:
                     return None
@@ -8223,12 +8225,36 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                 else:
                     wt_status = "中性"
                 
-                return {
+                result = {
                     'WT1': current_wt1,
                     'WT_Dir': wt_dir,
                     'WT_Status': wt_status,
-                    'RSI': current_rsi
+                    'RSI': current_rsi,
+                    # 1hr defaults
+                    'WT1_1h': None, 'WT_Dir_1h': None, 'WT_Status_1h': None, 'RSI_1h': None
                 }
+                
+                # 1-Hour timeframe
+                try:
+                    df_1h = ticker.history(period="1mo", interval="1h")
+                    if df_1h is not None and len(df_1h) >= 30:
+                        wt1_1h, _ = calc_wavetrend_elite(df_1h)
+                        rsi_1h = calc_rsi_elite(df_1h)
+                        if not wt1_1h.isna().iloc[-1]:
+                            val = float(wt1_1h.iloc[-1])
+                            prev_val = float(wt1_1h.iloc[-2]) if len(wt1_1h) > 1 else val
+                            result['WT1_1h'] = val
+                            result['WT_Dir_1h'] = "↑" if val > prev_val else "↓"
+                            result['RSI_1h'] = float(rsi_1h.iloc[-1])
+                            if val <= -60: result['WT_Status_1h'] = "超卖"
+                            elif val <= -53: result['WT_Status_1h'] = "接近超卖"
+                            elif val >= 60: result['WT_Status_1h'] = "超买"
+                            elif val >= 53: result['WT_Status_1h'] = "接近超买"
+                            else: result['WT_Status_1h'] = "中性"
+                except:
+                    pass
+                
+                return result
             except:
                 return None
         
@@ -8560,6 +8586,10 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                 'WT_Dir': tech.get('WT_Dir') if tech else None,
                                 'WT_Status': tech.get('WT_Status') if tech else None,
                                 'RSI': tech.get('RSI') if tech else None,
+                                'WT1_1h': tech.get('WT1_1h') if tech else None,
+                                'WT_Dir_1h': tech.get('WT_Dir_1h') if tech else None,
+                                'WT_Status_1h': tech.get('WT_Status_1h') if tech else None,
+                                'RSI_1h': tech.get('RSI_1h') if tech else None,
                                 'Has_Signal': vr_has_signal or len(combo_sigs) > 0,
                                 'Signals': combo_sigs,
                                 'Prev_DPI_History': prev_dpi_dict.get(symbol, []),
@@ -8655,8 +8685,8 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                 </div>
                                 """, unsafe_allow_html=True)
                                 
-                                # 三维度 + 关键位
-                                c1, c2, c3, c4, c5 = st.columns(5)
+                                # 三维度 + 关键位 + 1h技术
+                                c1, c2, c3, c4, c5, c6 = st.columns(6)
                                 with c1:
                                     ddr_v = ddf['ddr']
                                     ddr_ic = "🔴" if ddr_v > 1.2 else ("🟢" if ddr_v < 0.8 else "⚪")
@@ -8673,9 +8703,26 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                     hw = stock.get('HW')
                                     st.metric("Price", f"${price:.2f}" if price else "N/A", delta=f"HW:{hw:.0f}" if hw else None)
                                 with c5:
-                                    cw = stock.get('CW')
-                                    pw = stock.get('PW')
-                                    st.metric("CW/PW", f"{cw:.0f}/{pw:.0f}" if cw and pw else "N/A")
+                                    wt_1h = stock.get('WT1_1h')
+                                    wt_s_1h = stock.get('WT_Status_1h') or ""
+                                    st.metric(f"1hWT({wt_s_1h})", f"{wt_1h:.1f}" if wt_1h is not None else "N/A")
+                                with c6:
+                                    rsi_1h = stock.get('RSI_1h')
+                                    st.metric("1hRSI", f"{rsi_1h:.0f}" if rsi_1h is not None else "N/A")
+                                
+                                # 1h冲突检查
+                                sig_dir_ddf = 'bearish' if '做空' in ddf.get('signal_detail', '') else 'bullish'
+                                wt_1h_val = stock.get('WT1_1h')
+                                rsi_1h_val = stock.get('RSI_1h')
+                                if wt_1h_val is not None:
+                                    if sig_dir_ddf == 'bullish' and wt_1h_val >= 53:
+                                        st.warning(f"⛔ 1h技术冲突: 做多信号但1hWT={wt_1h_val:.0f}超买区 → 降低仓位或等回调")
+                                    elif sig_dir_ddf == 'bearish' and wt_1h_val <= -53:
+                                        st.warning(f"⛔ 1h技术冲突: 做空信号但1hWT={wt_1h_val:.0f}超卖区 → 降低仓位或等反弹")
+                                    elif sig_dir_ddf == 'bullish' and wt_1h_val <= -53:
+                                        st.success(f"✅ 1h技术确认: 做多+1hWT={wt_1h_val:.0f}超卖区 → 加强信心")
+                                    elif sig_dir_ddf == 'bearish' and wt_1h_val >= 53:
+                                        st.success(f"✅ 1h技术确认: 做空+1hWT={wt_1h_val:.0f}超买区 → 加强信心")
                             
                             st.divider()
                         else:
@@ -8816,12 +8863,59 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                             # 如果Gamma环境发生变化，标记
                             gamma_alert = ""
                             if gamma_changed:
-                                gamma_alert = f" ⚠️ Gamma环境变更: {orig_gamma_env}→{new_gamma_env}"
+                                gamma_alert = f" ⚠️ Gamma变更:{orig_gamma_env}→{new_gamma_env}"
+                            
+                            # ===== 1小时WT/RSI交叉验证 =====
+                            tech_1h_label = ""
+                            tech_1h_conflict = False
+                            wt1_1h = stock.get('WT1_1h')
+                            rsi_1h = stock.get('RSI_1h')
+                            wt_status_1h = stock.get('WT_Status_1h', '')
+                            wt_dir_1h = stock.get('WT_Dir_1h', '')
+                            
+                            # 判断信号方向 (DDF > VR > 组合)
+                            sig_direction = None
+                            if ddf.get('signal_name'):
+                                sig_direction = 'bearish' if '做空' in ddf.get('signal_detail', '') else 'bullish'
+                            elif vr_has_sig:
+                                sig_direction = vr_sig.get('direction')
+                            elif has_sig and stock.get('Signals'):
+                                sig_direction = stock['Signals'][0].get('direction')
+                            
+                            if wt1_1h is not None and sig_direction:
+                                # 1h超买超卖状态
+                                h_ob = wt1_1h >= 53  # overbought zone
+                                h_os = wt1_1h <= -53  # oversold zone
+                                h_rsi_ob = rsi_1h is not None and rsi_1h > 70
+                                h_rsi_os = rsi_1h is not None and rsi_1h < 30
+                                
+                                if sig_direction == 'bullish':
+                                    if h_ob:
+                                        tech_1h_conflict = True
+                                        tech_1h_label = f" | ⛔1h冲突:WT{wt1_1h:.0f}超买"
+                                    elif h_os:
+                                        tech_1h_label = f" | ✅1h确认:WT{wt1_1h:.0f}超卖"
+                                    elif h_rsi_ob:
+                                        tech_1h_conflict = True
+                                        tech_1h_label = f" | ⚠️1h:RSI{rsi_1h:.0f}偏高"
+                                elif sig_direction == 'bearish':
+                                    if h_os:
+                                        tech_1h_conflict = True
+                                        tech_1h_label = f" | ⛔1h冲突:WT{wt1_1h:.0f}超卖"
+                                    elif h_ob:
+                                        tech_1h_label = f" | ✅1h确认:WT{wt1_1h:.0f}超买"
+                                    elif h_rsi_os:
+                                        tech_1h_conflict = True
+                                        tech_1h_label = f" | ⚠️1h:RSI{rsi_1h:.0f}偏低"
+                            
+                            # 冲突时边框闪烁黄色
+                            if tech_1h_conflict and (has_sig or vr_has_sig or ddf.get('signal_name')):
+                                border_color = "#ffaa00"
                             
                             with st.container():
                                 st.markdown(f"""
                                 <div style="border-left: 4px solid {border_color}; padding-left: 15px; margin: 10px 0; background-color: rgba(0,0,0,0.02);">
-                                <h4>{sig_icon} {symbol} - {new_gamma_env}Gamma | {sig_text}{ddf_label}{gamma_alert}</h4>
+                                <h4>{sig_icon} {symbol} - {new_gamma_env}Gamma | {sig_text}{ddf_label}{tech_1h_label}{gamma_alert}</h4>
                                 </div>
                                 """, unsafe_allow_html=True)
                                 
@@ -8847,7 +8941,7 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                     # 显示关键位
                                     st.caption(f"HW:{hw:.0f} CW:{cw:.0f} PW:{pw:.0f}" if (hw and cw and pw) else "")
                                 
-                                # 第二行：VR/GR/DR及其变化
+                                # 第二行：VR/GR/DR + 日线WT/RSI
                                 col1, col2, col3, col4, col5, col6 = st.columns(6)
                                 with col1:
                                     vr_val = f"{stock['VR']:.2f}" if stock['VR'] else "N/A"
@@ -8867,12 +8961,18 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                 with col4:
                                     wt_val = f"{stock['WT1']:.1f}" if stock['WT1'] else "N/A"
                                     wt_status = stock['WT_Status'] or ""
-                                    st.metric(f"WT ({wt_status})", wt_val)
+                                    st.metric(f"日WT({wt_status}){stock.get('WT_Dir','')}", wt_val)
                                 with col5:
-                                    st.metric("WT方向", stock['WT_Dir'] or "N/A")
+                                    wt_1h = stock.get('WT1_1h')
+                                    wt_s_1h = stock.get('WT_Status_1h') or ""
+                                    wt_d_1h = stock.get('WT_Dir_1h') or ""
+                                    st.metric(f"1hWT({wt_s_1h}){wt_d_1h}", f"{wt_1h:.1f}" if wt_1h is not None else "N/A")
                                 with col6:
-                                    rsi_val = f"{stock['RSI']:.0f}" if stock['RSI'] else "N/A"
-                                    st.metric("RSI", rsi_val)
+                                    rsi_d = stock.get('RSI')
+                                    rsi_h = stock.get('RSI_1h')
+                                    rsi_str = f"{rsi_d:.0f}" if rsi_d else "N/A"
+                                    rsi_delta = f"1h:{rsi_h:.0f}" if rsi_h is not None else None
+                                    st.metric("RSI(日)", rsi_str, delta=rsi_delta)
                                 
                                 # 第三行：DPI和NE Skew先行指标
                                 with st.expander("📊 先行指标详情", expanded=has_sig):
