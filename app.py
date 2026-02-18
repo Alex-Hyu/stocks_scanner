@@ -1623,91 +1623,173 @@ def calculate_ddf_full(put_vol_t, call_vol_t, dr_t, vr_t,
 
 def calculate_dealer_delta_flow(put_vol_t, call_vol_t, dr_t, vr_t, gr_t,
                                 put_vol_t1, call_vol_t1, dr_t1, vr_t1,
-                                price=None, hw=None):
+                                price=None, hw=None, stock_vol=None):
     """
-    Dealer Delta Flow 三维分析模型
+    Dealer Delta Flow 三维分析 + 四大交易信号
     DDR = (PutVol × |DR|) / CallVol  →  >1偏空, <1偏多
     DDF = DDR_T - DDR_T-1  →  >0卖压增加, <0买压增加
-    Magnitude = |PutVol×|DR| - CallVol| × VR  →  对冲冲击规模
+    Magnitude = |PutVol×|DR| - CallVol| × VR / StockVolume  →  对冲冲击占股票成交量%
+    
+    四大信号:
+    1. 绝地反击(V-Reversal): 负Gamma + DDR>1.5 + DDF<-0.3 + Mag>8%
+    2. 瀑布杀跌(Waterfall): 负Gamma + DDR>1.2 + DDF>+0.3 + Mag>10%
+    3. 高位诱多(Bull Trap): 正Gamma + DDR<0.6 + DDF>+0.15 + Mag>5%
+    4. 慢牛爬坡(Grinding Up): 正Gamma + DDR<0.8 + DDF<-0.15 + Mag 3-8%
     """
     result = {
-        'ddr': None, 'ddr_t1': None, 'ddf': None, 'magnitude': None,
-        'mag_pct': None, 'direction': None, 'flow_direction': None,
+        'ddr': None, 'ddr_t1': None, 'ddf': None,
+        'magnitude': None, 'mag_pct': None,
+        'direction': None, 'flow_direction': None,
         'gamma_env': None, 'gr_accel': None,
         'ddr_text': '', 'ddf_text': '', 'mag_text': '',
-        'interpretation': '', 'final_action': ''
+        'interpretation': '', 'final_action': '',
+        'signal_name': None, 'signal_icon': '', 'signal_detail': ''
     }
-    # DDR_T
+    
+    # === DDR_T ===
     if put_vol_t is not None and call_vol_t is not None and call_vol_t > 0 and dr_t is not None:
         ddr = (put_vol_t * abs(dr_t)) / call_vol_t
         result['ddr'] = ddr
-        if ddr > 1:
+        if ddr > 2.0:
             result['direction'] = 'bearish'
-            result['ddr_text'] = f"DDR={ddr:.3f} > 1 → MM净正Delta → 需卖股对冲 → 偏空"
-        elif ddr < 1:
-            result['direction'] = 'bullish'
-            result['ddr_text'] = f"DDR={ddr:.3f} < 1 → MM净负Delta → 需买股对冲 → 偏多"
-        else:
+            result['ddr_text'] = f"DDR={ddr:.3f} ≫2 极度偏空区 → Put压倒性，MM需大量卖股对冲"
+        elif ddr > 1.2:
+            result['direction'] = 'bearish'
+            result['ddr_text'] = f"DDR={ddr:.3f} >1.2 偏空 → MM净正Delta，需卖股对冲"
+        elif ddr > 0.8:
             result['direction'] = 'neutral'
-            result['ddr_text'] = f"DDR={ddr:.3f} ≈ 1 → Delta均衡"
-    # DDR_T-1
+            result['ddr_text'] = f"DDR={ddr:.3f} ∈[0.8-1.2] 平衡区 → 对冲压力小，自然买卖盘驱动"
+        elif ddr > 0.5:
+            result['direction'] = 'bullish'
+            result['ddr_text'] = f"DDR={ddr:.3f} <0.8 偏多 → MM净负Delta，需买股对冲"
+        else:
+            result['direction'] = 'bullish'
+            result['ddr_text'] = f"DDR={ddr:.3f} ≪0.5 极度偏多区 → Call压倒性，MM需大量买股对冲"
+    
+    # === DDR_T-1 ===
     if put_vol_t1 is not None and call_vol_t1 is not None and call_vol_t1 > 0 and dr_t1 is not None:
         result['ddr_t1'] = (put_vol_t1 * abs(dr_t1)) / call_vol_t1
-    # DDF
+    
+    # === DDF ===
     if result['ddr'] is not None and result['ddr_t1'] is not None:
         ddf = result['ddr'] - result['ddr_t1']
         result['ddf'] = ddf
-        if ddf > 0.01:
+        if ddf > 0.5:
             result['flow_direction'] = 'more_bearish'
-            result['ddf_text'] = f"DDF={ddf:+.3f} → 卖股对冲压力↑ (比昨天更空)"
-        elif ddf < -0.01:
+            result['ddf_text'] = f"DDF={ddf:+.3f} ≫+0.5 强卖压信号 → MM必须开盘1hr内大规模卖股"
+        elif ddf > 0.15:
+            result['flow_direction'] = 'more_bearish'
+            result['ddf_text'] = f"DDF={ddf:+.3f} >+0.15 卖压增加 → MM需增加卖股对冲"
+        elif ddf < -0.5:
             result['flow_direction'] = 'more_bullish'
-            result['ddf_text'] = f"DDF={ddf:+.3f} → 买股对冲压力↑ (比昨天更多)"
+            result['ddf_text'] = f"DDF={ddf:+.3f} ≪-0.5 强买压信号 → MM必须开盘1hr内大规模买股"
+        elif ddf < -0.15:
+            result['flow_direction'] = 'more_bullish'
+            result['ddf_text'] = f"DDF={ddf:+.3f} <-0.15 买压增加 → MM需增加买股对冲"
         else:
             result['flow_direction'] = 'stable'
-            result['ddf_text'] = f"DDF={ddf:+.3f} → 对冲压力基本不变"
-    # Magnitude
+            result['ddf_text'] = f"DDF={ddf:+.3f} ∈[-0.15,+0.15] 对冲压力无显著变化"
+    
+    # === Magnitude (用Stock Volume做分母) ===
     if put_vol_t is not None and call_vol_t is not None and dr_t is not None and vr_t is not None:
-        raw = put_vol_t * abs(dr_t) - call_vol_t
-        mag = abs(raw) * vr_t
-        result['magnitude'] = mag
-        total = put_vol_t + call_vol_t
-        if total > 0:
-            mp = mag / total * 100
+        raw_delta = put_vol_t * abs(dr_t) - call_vol_t
+        hedge_shares = abs(raw_delta) * vr_t  # MM需要买卖的股数近似
+        result['magnitude'] = hedge_shares
+        
+        # 优先用Stock Volume，否则fallback到期权总量
+        denom = stock_vol if (stock_vol is not None and stock_vol > 0) else (put_vol_t + call_vol_t)
+        denom_label = "股票成交量" if (stock_vol is not None and stock_vol > 0) else "期权总量"
+        
+        if denom > 0:
+            mp = hedge_shares / denom * 100
             result['mag_pct'] = mp
-            if mp > 50:
-                result['mag_text'] = f"规模={mag:,.0f} ({mp:.0f}%总量) → 极强冲击"
-            elif mp > 20:
-                result['mag_text'] = f"规模={mag:,.0f} ({mp:.0f}%总量) → 中等冲击"
+            if mp > 10:
+                result['mag_text'] = f"Mag={mp:.1f}%{denom_label} → 🔴高确定性: MM对冲流接管盘面"
+            elif mp > 5:
+                result['mag_text'] = f"Mag={mp:.1f}%{denom_label} → 🟡中等: MM对冲有影响但可被干扰"
+            elif mp > 3:
+                result['mag_text'] = f"Mag={mp:.1f}%{denom_label} → ⚪低确定性: 轻仓,易被波动干扰"
             else:
-                result['mag_text'] = f"规模={mag:,.0f} ({mp:.0f}%总量) → 温和"
-    # Gamma
+                result['mag_text'] = f"Mag={mp:.1f}%{denom_label} → 噪音级别,忽略"
+    
+    # === Gamma环境 ===
     if price is not None and hw is not None:
         result['gamma_env'] = 'positive' if price > hw else 'negative'
     if gr_t is not None:
         result['gr_accel'] = gr_t
-    # 综合
+    
+    # === 综合解读 ===
     if result['ddr'] is not None:
         d = result['direction']
-        f = result.get('flow_direction')
+        fl = result.get('flow_direction')
         g = result.get('gamma_env')
-        dir_cn = '偏空(MM卖股)' if d == 'bearish' else ('偏多(MM买股)' if d == 'bullish' else '中性')
-        ge = '正Gamma压缩' if g == 'positive' else ('负Gamma放大' if g == 'negative' else '')
+        ddr_v = result['ddr']
+        ddf_v = result.get('ddf')
+        mp = result.get('mag_pct', 0) or 0
+        
+        dir_cn = {'bearish': '偏空(MM卖股)', 'bullish': '偏多(MM买股)', 'neutral': '平衡区'}.get(d, '中性')
+        ge = {'positive': '正Gamma(压缩波动)', 'negative': '负Gamma(放大趋势)'}.get(g, '')
         gr_e = ''
         if gr_t is not None:
             if gr_t > 2 and d == 'bearish': gr_e = ' | GR>2加速下跌'
             elif gr_t < 0.5 and d == 'bullish': gr_e = ' | GR<0.5加速上涨'
         result['interpretation'] = f"{dir_cn} | {ge}{gr_e}"
-        if d == 'bearish' and f == 'more_bearish':
-            result['final_action'] = '🔴 强做空: MM卖股+压力增加' + ('+负Gamma放大' if g == 'negative' else ',但正Gamma可能反弹')
-        elif d == 'bullish' and f == 'more_bullish':
-            result['final_action'] = '🟢 强做多: MM买股+压力增加' + ('+负Gamma放大' if g == 'negative' else ',但正Gamma可能回调')
-        elif d == 'bearish' and f == 'more_bullish':
-            result['final_action'] = '⚠️ DDR偏空但DDF转多，观望'
-        elif d == 'bullish' and f == 'more_bearish':
-            result['final_action'] = '⚠️ DDR偏多但DDF转空，观望'
-        elif f == 'stable':
-            result['final_action'] = ('🔴 偏空(压力稳定)' if d == 'bearish' else '🟢 偏多(压力稳定)') + (' +负Gamma' if g == 'negative' else '')
+        
+        # === 四大交易信号匹配 ===
+        if ddf_v is not None:
+            # 信号1: 绝地反击 V-Reversal (负Gamma + DDR偏空 + DDF强买)
+            if g == 'negative' and ddr_v > 1.5 and ddf_v < -0.3 and mp > 8:
+                result['signal_name'] = '绝地反击'
+                result['signal_icon'] = '⚡'
+                strength = '极强' if (ddf_v < -0.7 and mp > 12) else '强'
+                result['signal_detail'] = f"[{strength}做多] 空头结构反转: DDR={ddr_v:.2f}偏空但DDF={ddf_v:+.2f}强买+Mag={mp:.1f}%高确定 → 开盘下砸企稳后做多，目标Put Wall/Zero Gamma"
+                result['final_action'] = f"⚡ 绝地反击({strength}做多): MM被迫大量买股回补空头"
+            
+            # 信号2: 瀑布杀跌 Waterfall (负Gamma + DDR偏空 + DDF强卖)
+            elif g == 'negative' and ddr_v > 1.2 and ddf_v > 0.3 and mp > 10:
+                result['signal_name'] = '瀑布杀跌'
+                result['signal_icon'] = '🌊'
+                strength = '极强' if (ddf_v > 0.5 and mp > 15) else '强'
+                result['signal_detail'] = f"[{strength}做空] 多重卖压共振: DDR={ddr_v:.2f}偏空+DDF={ddf_v:+.2f}卖压增+Mag={mp:.1f}%+负Gamma放大 → 跌破前15min低点后做空"
+                result['final_action'] = f"🌊 瀑布杀跌({strength}做空): 负Gamma+MM顺势砸盘"
+            
+            # 信号3: 高位诱多 Bull Trap (正Gamma + DDR偏多 + DDF转卖)
+            elif g == 'positive' and ddr_v < 0.6 and ddf_v > 0 and mp > 5:
+                # 当DDR小时DDF绝对值也小，用比例判断: DDF/DDR_t1 > 20%视为有效
+                ddr_t1 = result.get('ddr_t1')
+                ddf_pct = (ddf_v / ddr_t1 * 100) if (ddr_t1 and ddr_t1 > 0) else 0
+                if ddf_v > 0.15 or ddf_pct > 20:
+                    result['signal_name'] = '高位诱多'
+                    result['signal_icon'] = '🪤'
+                    strength = '强' if (ddf_v > 0.3 or ddf_pct > 50) and mp > 8 else '中等'
+                    result['signal_detail'] = f"[{strength}做空] 正Gamma压制+买盘撤退: DDR={ddr_v:.3f}偏多但DDF={ddf_v:+.3f}({ddf_pct:+.0f}%)转卖+Mag={mp:.1f}% → Call Wall附近做空，目标回踩HW"
+                    result['final_action'] = f"🪤 高位诱多({strength}做空): 正Gamma+MM卸载多头"
+            
+            # 信号4: 慢牛爬坡 Grinding Higher (正Gamma + DDR偏多 + DDF稳买)
+            elif g == 'positive' and ddr_v < 0.8 and ddf_v < 0 and 3 < mp < 8:
+                ddr_t1 = result.get('ddr_t1')
+                ddf_pct = (ddf_v / ddr_t1 * 100) if (ddr_t1 and ddr_t1 > 0) else 0
+                if ddf_v < -0.15 or ddf_pct < -20:
+                    result['signal_name'] = '慢牛爬坡'
+                    result['signal_icon'] = '🐂'
+                    result['signal_detail'] = f"[轻仓做多] 正Gamma压缩+MM稳步补仓: DDR={ddr_v:.3f}偏多+DDF={ddf_v:+.3f}({ddf_pct:+.0f}%)买压+Mag={mp:.1f}% → 回踩支撑位做多"
+                    result['final_action'] = f"🐂 慢牛爬坡(轻仓做多): 正Gamma+MM稳步买入"
+            
+            # 无匹配 → 基础方向判断
+            else:
+                if d == 'bearish' and fl == 'more_bearish':
+                    result['final_action'] = '🔴 偏空: MM卖股+压力增加' + ('+负Gamma放大' if g == 'negative' else ',但正Gamma可能反弹')
+                elif d == 'bullish' and fl == 'more_bullish':
+                    result['final_action'] = '🟢 偏多: MM买股+压力增加' + ('+负Gamma放大' if g == 'negative' else ',但正Gamma可能回调')
+                elif d == 'bearish' and fl == 'more_bullish':
+                    result['final_action'] = '⚠️ DDR偏空但DDF转多，方向矛盾观望'
+                elif d == 'bullish' and fl == 'more_bearish':
+                    result['final_action'] = '⚠️ DDR偏多但DDF转空，方向矛盾观望'
+                elif fl == 'stable':
+                    result['final_action'] = f"{'🔴偏空' if d=='bearish' else '🟢偏多' if d=='bullish' else '⚪中性'}(压力稳定)" + (' +负Gamma' if g == 'negative' else '')
+                else:
+                    result['final_action'] = '⚪ 中性/数据不足'
+    
     return result
 
 
@@ -3840,10 +3922,13 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
             st.subheader("🏦 Dealer Delta Flow")
             st.caption("做市商Delta敞口方向 → 对冲行为 → 价格影响")
             
+            # 读取Stock Volume (QQQ)
+            today_stock_vol = parse_number_safe(str(csv_data.get('Stock Volume', ''))) if csv_data else None
+            
             ddf_result = calculate_dealer_delta_flow(
                 today_put_vol, today_call_vol, today_dr, today_vr, today_gr,
                 prev_put_vol, prev_call_vol, prev_dr, prev_vr,
-                price=current_price, hw=today_hw
+                price=current_price, hw=today_hw, stock_vol=today_stock_vol
             )
             
             if ddf_result['ddr'] is not None:
@@ -3874,6 +3959,17 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                     st.info(f"**规模**: {ddf_result['mag_text']}")
                 if ddf_result.get('final_action'):
                     st.markdown(f"### {ddf_result['final_action']}")
+                
+                # 四大信号匹配
+                if ddf_result.get('signal_name'):
+                    st.markdown(f"""
+                    <div style="border: 2px solid {'#ff4b4b' if '做空' in ddf_result.get('signal_detail','') else '#00cc66'}; border-radius: 10px; padding: 15px; margin: 10px 0;">
+                    <h3>{ddf_result['signal_icon']} {ddf_result['signal_name']}</h3>
+                    <p>{ddf_result['signal_detail']}</p>
+                    <p style="color: #888; font-size: 0.85em;">⏰ 最佳窗口: 9:45-10:45 (MM清算时间) | ❌ 失效: 1hr未按方向运动则平仓</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
                 st.caption(f"综合: {ddf_result.get('interpretation', '')}")
                 
                 # Volume明细
@@ -8270,6 +8366,7 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                             'iv_rank': parse_number_safe(row.get('IV Rank')),
                             'options_implied_move': parse_number_safe(row.get('Options Implied Move')),
                             'previous_close': parse_number_safe(row.get('Previous Close')),
+                            'stock_volume': parse_number_safe(row.get('Stock Volume')),
                         })
                     
                     today_data = pd.DataFrame(parsed_data)
@@ -8406,10 +8503,11 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                             vr_has_signal = vr_signal['type'] is not None and vr_signal['direction'] is not None
                             
                             # ===== Dealer Delta Flow (DDF) =====
+                            stock_vol = row.get('stock_volume')
                             ddf_data = calculate_dealer_delta_flow(
                                 put_vol, call_vol, dr, vr, gr,
                                 prev_put_vol, prev_call_vol, prev_dr, prev_vr,
-                                price=price, hw=hw
+                                price=price, hw=hw, stock_vol=stock_vol
                             )
                             
                             # ===== 传统A-I组合信号 =====
@@ -8634,12 +8732,14 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                             ddf = stock.get('DDF', {})
                             if ddf.get('ddr') is not None:
                                 ddr_v = ddf['ddr']
-                                if ddr_v > 1:
+                                if ddf.get('signal_name'):
+                                    ddf_label = f" | {ddf['signal_icon']}{ddf['signal_name']}"
+                                elif ddr_v > 1.2:
                                     ddf_label = f" | DDR:{ddr_v:.2f}🔴MM卖股"
-                                elif ddr_v < 1:
+                                elif ddr_v < 0.8:
                                     ddf_label = f" | DDR:{ddr_v:.2f}🟢MM买股"
                                 else:
-                                    ddf_label = f" | DDR:{ddr_v:.2f}⚪均衡"
+                                    ddf_label = f" | DDR:{ddr_v:.2f}⚪平衡"
                             
                             # 如果Gamma环境发生变化，标记
                             gamma_alert = ""
@@ -8845,6 +8945,14 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                             st.info(f"**③规模**: {ddf['mag_text']}")
                                         if ddf.get('final_action'):
                                             st.markdown(f"**→ {ddf['final_action']}**")
+                                        
+                                        # 四大信号匹配
+                                        if ddf.get('signal_name'):
+                                            sig_color = '#ff4b4b' if '做空' in ddf.get('signal_detail', '') else '#00cc66'
+                                            st.markdown(f"""<div style="border:2px solid {sig_color}; border-radius:8px; padding:10px; margin:5px 0;">
+                                            <b>{ddf['signal_icon']} {ddf['signal_name']}</b><br>{ddf['signal_detail']}<br>
+                                            <span style="color:#888; font-size:0.85em">⏰ 9:45-10:45最佳 | ❌ 1hr未动则平仓</span>
+                                            </div>""", unsafe_allow_html=True)
                                         
                                         # Volume明细
                                         cv = stock.get('Call_Vol')
