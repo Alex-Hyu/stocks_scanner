@@ -3742,7 +3742,10 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
             dr_change = (today_dr - prev_dr) if (today_dr is not None and prev_dr is not None) else None
             
             # 读取 Call Volume / Put Volume (T 和 T-1)
-            # Call/Put Volume变量（DDF模型已在上方处理）
+            today_call_vol = parse_number_safe(str(csv_data.get('Call Volume', ''))) if csv_data else None
+            today_put_vol = parse_number_safe(str(csv_data.get('Put Volume', ''))) if csv_data else None
+            prev_call_vol = parse_number_safe(str(csv_data_prev.get('Call Volume', ''))) if csv_data_prev else None
+            prev_put_vol = parse_number_safe(str(csv_data_prev.get('Put Volume', ''))) if csv_data_prev else None
             
             # 计算先行指标变化量 (T vs T-2)
             dpi_change_t2 = (today_dpi - prev2_dpi) if (today_dpi is not None and prev2_dpi is not None) else None
