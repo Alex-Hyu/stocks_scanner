@@ -3743,6 +3743,63 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                     gamma_env = 'negative'
                     st.error(f"**Gamma环境**: 🔴 负Gamma (价格 {current_price:.2f} < Zero Gamma {today_hw:.0f}) - 做多优势")
             
+            # ===== 🏦 Dealer Delta Flow (QQQ) =====
+            st.subheader("🏦 Dealer Delta Flow")
+            st.caption("做市商Delta敞口方向 → 对冲行为 → 价格影响")
+            
+            ddf_result = calculate_dealer_delta_flow(
+                today_put_vol, today_call_vol, today_dr, today_vr, today_gr,
+                prev_put_vol, prev_call_vol, prev_dr, prev_vr,
+                price=current_price, hw=today_hw
+            )
+            
+            if ddf_result['ddr'] is not None:
+                col_d1, col_d2, col_d3 = st.columns(3)
+                with col_d1:
+                    ddr_v = ddf_result['ddr']
+                    ddr_ic = "🔴" if ddr_v > 1 else ("🟢" if ddr_v < 1 else "⚪")
+                    st.metric("DDR (方向)", f"{ddr_ic} {ddr_v:.3f}",
+                             delta=f"T-1: {ddf_result['ddr_t1']:.3f}" if ddf_result.get('ddr_t1') is not None else None)
+                with col_d2:
+                    if ddf_result.get('ddf') is not None:
+                        ddf_v = ddf_result['ddf']
+                        ddf_ic = "📉卖压↑" if ddf_v > 0.01 else ("📈买压↑" if ddf_v < -0.01 else "➖持平")
+                        st.metric(f"DDF ({ddf_ic})", f"{ddf_v:+.3f}")
+                    else:
+                        st.metric("DDF (变化)", "无T-1数据")
+                with col_d3:
+                    if ddf_result.get('magnitude') is not None:
+                        mag = ddf_result['magnitude']
+                        mag_s = f"{mag/1e9:.1f}B" if mag > 1e9 else (f"{mag/1e6:.1f}M" if mag > 1e6 else f"{mag:,.0f}")
+                        st.metric("Magnitude (规模)", mag_s, delta=f"{ddf_result['mag_pct']:.0f}%总量" if ddf_result.get('mag_pct') else None)
+                
+                # 详细解读
+                st.info(f"**方向**: {ddf_result['ddr_text']}")
+                if ddf_result.get('ddf_text'):
+                    st.info(f"**变化**: {ddf_result['ddf_text']}")
+                if ddf_result.get('mag_text'):
+                    st.info(f"**规模**: {ddf_result['mag_text']}")
+                if ddf_result.get('final_action'):
+                    st.markdown(f"### {ddf_result['final_action']}")
+                st.caption(f"综合: {ddf_result.get('interpretation', '')}")
+                
+                # Volume明细
+                with st.expander("📊 Call/Put Volume明细", expanded=False):
+                    def _fmt(v):
+                        if v is None: return "N/A"
+                        return f"{v/1e6:.2f}M" if abs(v)>=1e6 else (f"{v/1e3:.1f}K" if abs(v)>=1e3 else f"{v:,.0f}")
+                    vc = st.columns(4)
+                    with vc[0]: st.metric("Call Vol(T)", _fmt(today_call_vol))
+                    with vc[1]: st.metric("Put Vol(T)", _fmt(today_put_vol))
+                    with vc[2]: st.metric("Call Vol(T-1)", _fmt(prev_call_vol))
+                    with vc[3]: st.metric("Put Vol(T-1)", _fmt(prev_put_vol))
+                    if today_call_vol and prev_call_vol:
+                        st.caption(f"Call Δ={today_call_vol-prev_call_vol:+,.0f} | Put Δ={today_put_vol-prev_put_vol:+,.0f}" if today_put_vol and prev_put_vol else "")
+            else:
+                st.warning("⚠️ 缺少Call Volume/Put Volume/Delta Ratio数据，无法计算DDF")
+            
+            st.divider()
+            
             # 匹配组合信号
             combo_signals = []
             if vr_change is not None or gr_change is not None or dr_change is not None:
@@ -8256,10 +8313,10 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                             vr_has_signal = vr_signal['type'] is not None and vr_signal['direction'] is not None
                             
                             # ===== Dealer Delta Flow (DDF) =====
-                            ddf_data = calculate_ddf_full(
-                                put_vol, call_vol, dr, vr,
+                            ddf_data = calculate_dealer_delta_flow(
+                                put_vol, call_vol, dr, vr, gr,
                                 prev_put_vol, prev_call_vol, prev_dr, prev_vr,
-                                gamma_env, gr
+                                price=price, hw=hw
                             )
                             
                             # ===== 传统A-I组合信号 =====
@@ -8481,8 +8538,9 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                             
                             # DDF方向标注
                             ddf_label = ""
-                            if ddf.get('ddr_t') is not None:
-                                ddr_v = ddf['ddr_t']
+                            ddf = stock.get('DDF', {})
+                            if ddf.get('ddr') is not None:
+                                ddr_v = ddf['ddr']
                                 if ddr_v > 1:
                                     ddf_label = f" | DDR:{ddr_v:.2f}🔴MM卖股"
                                 elif ddr_v < 1:
@@ -8670,30 +8728,30 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                         with col_d1:
                                             ddr_v = ddf['ddr']
                                             ddr_icon = "🔴" if ddr_v > 1 else ("🟢" if ddr_v < 1 else "⚪")
-                                            ddr_dir = "MM卖股→偏空" if ddr_v > 1 else ("MM买股→偏多" if ddr_v < 1 else "均衡")
-                                            ddf_delta_str = f"T-1:{ddf['ddr_t1']:.3f}" if ddf.get('ddr_t1') is not None else None
-                                            st.metric(f"DDR {ddr_icon}", f"{ddr_v:.3f}", delta=ddf_delta_str, help=ddr_dir)
+                                            st.metric(f"DDR {ddr_icon}", f"{ddr_v:.3f}",
+                                                     delta=f"T-1: {ddf['ddr_t1']:.3f}" if ddf.get('ddr_t1') is not None else None)
                                         with col_d2:
                                             if ddf.get('ddf') is not None:
                                                 ddf_v = ddf['ddf']
-                                                fl = "卖压↑" if ddf_v > 0.01 else ("买压↑" if ddf_v < -0.01 else "持平")
-                                                st.metric(f"DDF ({fl})", f"{ddf_v:+.3f}")
+                                                fl_icon = "📉" if ddf_v > 0.01 else ("📈" if ddf_v < -0.01 else "➖")
+                                                fl_text = "卖压↑" if ddf_v > 0.01 else ("买压↑" if ddf_v < -0.01 else "持平")
+                                                st.metric(f"DDF {fl_icon}{fl_text}", f"{ddf_v:+.3f}")
                                             else:
                                                 st.metric("DDF", "无T-1")
                                         with col_d3:
                                             if ddf.get('magnitude') is not None:
                                                 mag = ddf['magnitude']
                                                 mag_s = f"{mag/1e9:.1f}B" if mag > 1e9 else (f"{mag/1e6:.1f}M" if mag > 1e6 else f"{mag:,.0f}")
-                                                st.metric("对冲规模", mag_s, delta=f"{ddf['mag_pct']:.0f}%总量" if ddf.get('mag_pct') else None)
+                                                st.metric("规模", mag_s, delta=f"{ddf['mag_pct']:.0f}%总量" if ddf.get('mag_pct') else None)
                                         
-                                        # 解读
-                                        st.caption(ddf.get('ddr_text', ''))
+                                        # 三维度文字解读
+                                        st.info(f"**①方向**: {ddf.get('ddr_text', '')}")
                                         if ddf.get('ddf_text'):
-                                            st.caption(ddf['ddf_text'])
+                                            st.info(f"**②变化**: {ddf['ddf_text']}")
                                         if ddf.get('mag_text'):
-                                            st.caption(ddf['mag_text'])
+                                            st.info(f"**③规模**: {ddf['mag_text']}")
                                         if ddf.get('final_action'):
-                                            st.markdown(f"**{ddf['final_action']}**")
+                                            st.markdown(f"**→ {ddf['final_action']}**")
                                         
                                         # Volume明细
                                         cv = stock.get('Call_Vol')
@@ -8702,13 +8760,13 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                         ppv = stock.get('Prev_Put_Vol')
                                         vol_parts = []
                                         if cv is not None:
-                                            vol_parts.append(f"Call Vol: {cv:,.0f}")
+                                            vol_parts.append(f"Call={cv:,.0f}")
                                         if pv is not None:
-                                            vol_parts.append(f"Put Vol: {pv:,.0f}")
+                                            vol_parts.append(f"Put={pv:,.0f}")
                                         if vol_parts:
-                                            st.caption("T日: " + " | ".join(vol_parts))
-                                        if pcv is not None and ppv is not None:
-                                            st.caption(f"T-1: Call={pcv:,.0f} Put={ppv:,.0f} | Δ Call={cv-pcv:+,.0f} Put={pv-ppv:+,.0f}" if cv and pv else f"T-1: Call={pcv:,.0f} Put={ppv:,.0f}")
+                                            st.caption("T: " + " | ".join(vol_parts))
+                                        if pcv is not None and ppv is not None and cv is not None and pv is not None:
+                                            st.caption(f"T-1: Call={pcv:,.0f} Put={ppv:,.0f} | Δ Call={cv-pcv:+,.0f} Put={pv-ppv:+,.0f}")
                                 
                                 st.markdown("---")
                     else:
