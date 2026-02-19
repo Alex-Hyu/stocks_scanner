@@ -1745,10 +1745,26 @@ def calculate_dealer_delta_flow(put_vol_t, call_vol_t, dr_t, vr_t, gr_t,
             elif gr_t < 0.5 and d == 'bullish': gr_e = ' | GR<0.5加速上涨'
         result['interpretation'] = f"{dir_cn} | {ge}{gr_e}"
         
-        # === 四大交易信号匹配 ===
+        # === 交易信号匹配 (极值优先 → 四大信号) ===
         if ddf_v is not None:
+            # 极值信号 (最高优先级 - 不依赖Gamma环境)
+            is_extreme_bearish = (ddr_v > 2.5) and (dr_t is not None and dr_t < -4.0)
+            is_extreme_bullish = (ddr_v < 0.2) and (dr_t is not None and dr_t > -0.3)
+            
+            if is_extreme_bearish and ddf_v < -0.5:
+                result['signal_name'] = '极值空头踩踏'
+                result['signal_icon'] = '🔥'
+                result['signal_detail'] = f"[极强做多] DDR={ddr_v:.2f}≫2.5+DR={dr_t:.2f}极度偏空，但DDF={ddf_v:+.2f}大幅回补 → 空头踩踏式反弹，开盘企稳即做多"
+                result['final_action'] = f"🔥 极值空头踩踏(极强做多): 极度超卖+MM暴力回补"
+            
+            elif is_extreme_bullish and ddf_v > 0.3:
+                result['signal_name'] = '极值多头清算'
+                result['signal_icon'] = '💀'
+                result['signal_detail'] = f"[极强做空] DDR={ddr_v:.2f}≪0.2+DR={dr_t:.2f}极度偏多，但DDF={ddf_v:+.2f}大幅卸货 → 多头清算式闪崩，冲高做空"
+                result['final_action'] = f"💀 极值多头清算(极强做空): 极度超买+MM集体卸货"
+            
             # 信号1: 绝地反击 V-Reversal (负Gamma + DDR偏空 + DDF强买)
-            if g == 'negative' and ddr_v > 1.5 and ddf_v < -0.3 and mp > 10:
+            elif g == 'negative' and ddr_v > 1.5 and ddf_v < -0.3 and mp > 10:
                 result['signal_name'] = '绝地反击'
                 result['signal_icon'] = '⚡'
                 strength = '极强' if (ddf_v < -0.7 and mp > 30) else '强'
