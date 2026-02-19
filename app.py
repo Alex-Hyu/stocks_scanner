@@ -3599,7 +3599,7 @@ def main():
         "📊 板块资金流", 
         "🔍 个股筛选", 
         "🎯 综合名单",
-        "📡 20股精选",
+        "📡 精选追踪",
         "🌅 盘前扫描"
     ])
     
@@ -3678,6 +3678,58 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
             
             # 分析（传入CSV数据）
             analysis = analyze_qqq_nq(premarket_data, csv_data)
+            
+            # 刷新盘前/盘中价格 + 技术指标
+            col_ref1, col_ref2 = st.columns([1, 3])
+            with col_ref1:
+                qqq_refresh = st.button("🔄 刷新QQQ价格+技术", key="refresh_qqq_realtime")
+            
+            if qqq_refresh:
+                with st.spinner("获取QQQ实时数据..."):
+                    try:
+                        qqq_tk = yf.Ticker("QQQ")
+                        qqq_info = qqq_tk.info
+                        live_price = qqq_info.get('preMarketPrice') or qqq_info.get('regularMarketPrice')
+                        if live_price:
+                            st.session_state['qqq_live_price'] = float(live_price)
+                        # 1h WT/RSI
+                        df_1h = qqq_tk.history(period="1mo", interval="1h")
+                        if df_1h is not None and len(df_1h) >= 30:
+                            ap = (df_1h['High'] + df_1h['Low'] + df_1h['Close']) / 3
+                            esa = ap.ewm(span=10, adjust=False).mean()
+                            d = (ap - esa).abs().ewm(span=10, adjust=False).mean()
+                            d = d.replace(0, np.nan)
+                            ci = (ap - esa) / (0.015 * d)
+                            wt1_1h = ci.ewm(span=21, adjust=False).mean()
+                            delta_1h = df_1h['Close'].diff()
+                            gain = (delta_1h.where(delta_1h > 0, 0)).rolling(window=14).mean()
+                            loss = (-delta_1h.where(delta_1h < 0, 0)).rolling(window=14).mean()
+                            rsi_1h = 100 - (100 / (1 + gain / loss))
+                            
+                            st.session_state['qqq_wt1_1h'] = float(wt1_1h.iloc[-1])
+                            st.session_state['qqq_rsi_1h'] = float(rsi_1h.iloc[-1])
+                            st.session_state['qqq_wt_dir_1h'] = "↑" if wt1_1h.iloc[-1] > wt1_1h.iloc[-2] else "↓"
+                        st.success("✅ QQQ数据已刷新")
+                    except Exception as e:
+                        st.error(f"刷新失败: {e}")
+            
+            # 显示1h技术指标(如果有)
+            if st.session_state.get('qqq_wt1_1h') is not None:
+                wt_1h = st.session_state['qqq_wt1_1h']
+                rsi_1h = st.session_state['qqq_rsi_1h']
+                wt_dir = st.session_state.get('qqq_wt_dir_1h', '')
+                wt_s = "超卖" if wt_1h <= -60 else ("超买" if wt_1h >= 60 else ("接近超卖" if wt_1h <= -53 else ("接近超买" if wt_1h >= 53 else "中性")))
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    st.metric(f"QQQ 1h WT ({wt_s}){wt_dir}", f"{wt_1h:.1f}")
+                with c2:
+                    st.metric("QQQ 1h RSI", f"{rsi_1h:.0f}")
+                with c3:
+                    live_p = st.session_state.get('qqq_live_price')
+                    if live_p:
+                        st.metric("实时价格", f"${live_p:.2f}")
+            
+            st.divider()
             
             # 显示分析结果
             col1, col2 = st.columns(2)
@@ -8128,9 +8180,9 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
 
     # ========== Tab 8: 100股追踪 ==========
 
-    # ========== Tab 8: 20股精选追踪 ==========
+    # ========== Tab 8: 精选股票追踪 ==========
     with tab8:
-        st.header("📡 20股精选追踪系统")
+        st.header("📡 精选追踪追踪系统")
         st.caption("组合信号框架 + 技术面(WT/RSI)确认 + D0/D5验证追踪")
         
         # ========== 股票配置 ==========
@@ -8143,38 +8195,49 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
         # MAG7固定
         MAG7 = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META', 'NVDA', 'TSLA']
         
-        # 默认可配置13只
-        DEFAULT_13 = ['AMD', 'SMCI', 'ARM', 'COIN', 'MSTR', 'PLTR', 'CRWD', 'NFLX', 'CRM', 'SNOW', 'MU', 'AVGO', 'HOOD']
+        # 默认可配置23只 (个股13 + ETF/指数10)
+        DEFAULT_23 = [
+            # 个股13只
+            'AMD', 'SMCI', 'ARM', 'COIN', 'MSTR', 'PLTR', 'CRWD', 'NFLX', 'CRM', 'SNOW', 'MU', 'AVGO', 'HOOD',
+            # ETF/指数10只
+            'SPY', 'SPX', 'VIX', 'GLD', 'SLV', 'IWM', 'SMH', 'XLE', 'XLU', 'XLF'
+        ]
         
         # 加载或使用默认配置
         saved_config = load_worksheet_data(ELITE20_CONFIG_WS) or {}
-        custom_13 = saved_config.get('custom_13', DEFAULT_13)
+        custom_list = saved_config.get('custom_13') or saved_config.get('custom_23') or DEFAULT_23
+        # 兼容旧的13只配置：自动补充新增的10只
+        if len(custom_list) < 20:
+            new_etfs = ['SPY', 'SPX', 'VIX', 'GLD', 'SLV', 'IWM', 'SMH', 'XLE', 'XLU', 'XLF']
+            for etf in new_etfs:
+                if etf not in custom_list and etf not in MAG7:
+                    custom_list.append(etf)
         
         # 显示配置
-        with st.expander("⚙️ 20股配置", expanded=False):
+        with st.expander("⚙️ 精选股票配置", expanded=False):
             st.markdown("**🔒 MAG7 (固定)**")
             st.code(", ".join(MAG7))
             
-            st.markdown("**⚙️ 可配置13只**")
-            new_13_input = st.text_input(
+            st.markdown(f"**⚙️ 可配置清单 (当前{len(custom_list)}只，最多23只)**")
+            new_input = st.text_input(
                 "编辑股票清单（逗号分隔）",
-                value=", ".join(custom_13),
+                value=", ".join(custom_list),
                 key="elite20_custom_input"
             )
             
             if st.button("💾 保存配置", key="save_elite20_config"):
-                new_list = [s.strip().upper() for s in new_13_input.split(",") if s.strip()]
-                if len(new_list) == 13:
-                    saved_config['custom_13'] = new_list
+                new_list = [s.strip().upper() for s in new_input.split(",") if s.strip()]
+                if 1 <= len(new_list) <= 23:
+                    saved_config['custom_23'] = new_list
                     if save_worksheet_data(ELITE20_CONFIG_WS, saved_config):
-                        custom_13 = new_list
-                        st.success(f"✅ 已保存: {new_list}")
+                        custom_list = new_list
+                        st.success(f"✅ 已保存 {len(new_list)} 只: {new_list}")
                         st.rerun()
                 else:
-                    st.error(f"❌ 需要13只股票，当前 {len(new_list)} 只")
+                    st.error(f"❌ 需要1-23只股票，当前 {len(new_list)} 只")
         
-        # 完整20只清单
-        ELITE_20 = MAG7 + custom_13
+        # 完整清单 (MAG7 + 自定义，最多30只)
+        ELITE_20 = MAG7 + custom_list
         st.info(f"📋 追踪清单 ({len(ELITE_20)}只): {', '.join(ELITE_20)}")
         
         # ========== 技术指标函数 ==========
@@ -8260,7 +8323,7 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
         
         # ========== 数据上传 ==========
         st.subheader("📤 上传今日数据")
-        st.caption("上传5000+股票CSV，自动提取20只精选股票数据。文件名含日期（如xxx_2026-02-13.csv）将自动保存")
+        st.caption("上传5000+股票CSV，自动提取精选股票数据(最多30只)。文件名含日期（如xxx_2026-02-13.csv）将自动保存")
         
         elite_file = st.file_uploader(
             "上传期权数据CSV（SpotGamma Equity Hub）",
@@ -8404,6 +8467,7 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                             'put_call_oi_ratio': parse_number_safe(row.get('Put/Call OI\xa0Ratio') or row.get('Put/Call OI Ratio')),
                             'iv_rank': parse_number_safe(row.get('IV Rank')),
                             'options_implied_move': parse_number_safe(row.get('Options Implied Move')),
+                            'options_impact': parse_number_safe(row.get('Options Impact')),
                             'previous_close': parse_number_safe(row.get('Previous Close')),
                             'stock_volume': parse_number_safe(row.get('Stock Volume')),
                         })
@@ -8582,6 +8646,7 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                 'DPI_5d': dpi_5d,
                                 'NE_Skew': ne_skew,
                                 'NE_Skew_Chg': ne_skew_chg,
+                                'Options_Impact': row.get('options_impact'),
                                 'WT1': tech.get('WT1') if tech else None,
                                 'WT_Dir': tech.get('WT_Dir') if tech else None,
                                 'WT_Status': tech.get('WT_Status') if tech else None,
@@ -8742,37 +8807,54 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                         
                         # ========== 所有20只股票详细展示 ==========
                         st.divider()
-                        st.subheader(f"📋 20只精选股票详细数据")
+                        st.subheader(f"📋 精选股票详细数据")
                         
-                        # 盘前价格刷新按钮
+                        # 盘前/盘中刷新按钮 (价格 + 技术指标)
                         col_refresh1, col_refresh2 = st.columns([1, 3])
                         with col_refresh1:
-                            refresh_premarket = st.button("🔄 刷新盘前价格", key="refresh_elite20_premarket")
+                            refresh_premarket = st.button("🔄 刷新价格+技术指标", key="refresh_elite20_premarket")
                         
-                        # 存储刷新后的价格
+                        # 存储刷新后的数据
                         premarket_prices = {}
+                        refreshed_tech = {}
                         if refresh_premarket:
-                            with st.spinner("获取盘前价格..."):
-                                for stock in all_stocks_data:
+                            progress = st.progress(0)
+                            total = len(all_stocks_data)
+                            with st.spinner("获取实时价格和技术指标..."):
+                                for idx, stock in enumerate(all_stocks_data):
                                     symbol = stock['Symbol']
+                                    progress.progress((idx + 1) / total, text=f"刷新 {symbol}...")
                                     try:
                                         ticker = yf.Ticker(symbol)
-                                        # 尝试获取盘前价格
                                         info = ticker.info
                                         pre_price = info.get('preMarketPrice') or info.get('regularMarketPrice')
                                         if pre_price:
                                             premarket_prices[symbol] = float(pre_price)
+                                        # 刷新技术指标
+                                        tech_new = get_tech_indicators_elite(symbol)
+                                        if tech_new:
+                                            refreshed_tech[symbol] = tech_new
                                     except:
                                         pass
+                                progress.empty()
                             
+                            msg_parts = []
                             if premarket_prices:
-                                st.success(f"✅ 已刷新 {len(premarket_prices)} 只股票的盘前价格")
+                                msg_parts.append(f"{len(premarket_prices)}只价格")
+                            if refreshed_tech:
+                                msg_parts.append(f"{len(refreshed_tech)}只技术指标")
+                            if msg_parts:
+                                st.success(f"✅ 已刷新: {' + '.join(msg_parts)}")
                         
                         # 存储到session_state
                         if 'elite20_premarket_prices' not in st.session_state:
                             st.session_state.elite20_premarket_prices = {}
+                        if 'elite20_refreshed_tech' not in st.session_state:
+                            st.session_state.elite20_refreshed_tech = {}
                         if premarket_prices:
                             st.session_state.elite20_premarket_prices = premarket_prices
+                        if refreshed_tech:
+                            st.session_state.elite20_refreshed_tech = refreshed_tech
                         
                         # 筛选器
                         filter_option = st.radio(
@@ -8798,10 +8880,22 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                             symbol = stock['Symbol']
                             has_sig = stock['Has_Signal']
                             
-                            # 获取价格（优先使用盘前价格）
+                            # 获取价格（优先使用盘前/盘中价格）
                             csv_price = stock['Price']
                             premarket_price = st.session_state.get('elite20_premarket_prices', {}).get(symbol)
                             current_price = premarket_price if premarket_price else csv_price
+                            
+                            # 使用刷新后的技术指标（如果有）
+                            rt = st.session_state.get('elite20_refreshed_tech', {}).get(symbol)
+                            if rt:
+                                stock['WT1'] = rt.get('WT1', stock['WT1'])
+                                stock['WT_Dir'] = rt.get('WT_Dir', stock['WT_Dir'])
+                                stock['WT_Status'] = rt.get('WT_Status', stock['WT_Status'])
+                                stock['RSI'] = rt.get('RSI', stock['RSI'])
+                                stock['WT1_1h'] = rt.get('WT1_1h', stock.get('WT1_1h'))
+                                stock['WT_Dir_1h'] = rt.get('WT_Dir_1h', stock.get('WT_Dir_1h'))
+                                stock['WT_Status_1h'] = rt.get('WT_Status_1h', stock.get('WT_Status_1h'))
+                                stock['RSI_1h'] = rt.get('RSI_1h', stock.get('RSI_1h'))
                             
                             # 获取关键位
                             hw = stock['HW']
@@ -8865,57 +8959,71 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                             if gamma_changed:
                                 gamma_alert = f" ⚠️ Gamma变更:{orig_gamma_env}→{new_gamma_env}"
                             
-                            # ===== 1小时WT/RSI交叉验证 =====
+                            # ===== 信号时间窗口交叉验证 =====
                             tech_1h_label = ""
                             tech_1h_conflict = False
                             wt1_1h = stock.get('WT1_1h')
                             rsi_1h = stock.get('RSI_1h')
                             wt_status_1h = stock.get('WT_Status_1h', '')
                             wt_dir_1h = stock.get('WT_Dir_1h', '')
+                            oi_val = stock.get('Options_Impact')
                             
-                            # 判断信号方向 (DDF > VR > 组合)
-                            sig_direction = None
+                            # DDF方向(开盘1hr短线)
+                            ddf_dir = None
                             if ddf.get('signal_name'):
-                                sig_direction = 'bearish' if '做空' in ddf.get('signal_detail', '') else 'bullish'
-                            elif vr_has_sig:
-                                sig_direction = vr_sig.get('direction')
+                                ddf_dir = 'bearish' if '做空' in ddf.get('signal_detail', '') else 'bullish'
+                            elif ddf.get('ddr') is not None:
+                                ddr_v = ddf['ddr']
+                                if ddr_v > 1.2: ddf_dir = 'bearish'
+                                elif ddr_v < 0.8: ddf_dir = 'bullish'
+                            
+                            # VR方向(日内波段/T+1)
+                            vr_dir = None
+                            if vr_has_sig:
+                                vr_dir = vr_sig.get('direction')
                             elif has_sig and stock.get('Signals'):
-                                sig_direction = stock['Signals'][0].get('direction')
+                                vr_dir = stock['Signals'][0].get('direction')
                             
-                            if wt1_1h is not None and sig_direction:
-                                # 1h超买超卖状态
-                                h_ob = wt1_1h >= 53  # overbought zone
-                                h_os = wt1_1h <= -53  # oversold zone
-                                h_rsi_ob = rsi_1h is not None and rsi_1h > 70
-                                h_rsi_os = rsi_1h is not None and rsi_1h < 30
-                                
-                                if sig_direction == 'bullish':
-                                    if h_ob:
-                                        tech_1h_conflict = True
-                                        tech_1h_label = f" | ⛔1h冲突:WT{wt1_1h:.0f}超买"
-                                    elif h_os:
-                                        tech_1h_label = f" | ✅1h确认:WT{wt1_1h:.0f}超卖"
-                                    elif h_rsi_ob:
-                                        tech_1h_conflict = True
-                                        tech_1h_label = f" | ⚠️1h:RSI{rsi_1h:.0f}偏高"
-                                elif sig_direction == 'bearish':
-                                    if h_os:
-                                        tech_1h_conflict = True
-                                        tech_1h_label = f" | ⛔1h冲突:WT{wt1_1h:.0f}超卖"
-                                    elif h_ob:
-                                        tech_1h_label = f" | ✅1h确认:WT{wt1_1h:.0f}超买"
-                                    elif h_rsi_os:
-                                        tech_1h_conflict = True
-                                        tech_1h_label = f" | ⚠️1h:RSI{rsi_1h:.0f}偏低"
+                            # 时间窗口标注
+                            if ddf_dir and vr_dir:
+                                if ddf_dir == vr_dir:
+                                    # 共振 = 全时间维度一致
+                                    dir_cn = '做多' if ddf_dir == 'bullish' else '做空'
+                                    tech_1h_label = f" | 🔥全维度{dir_cn}"
+                                else:
+                                    # 时间差 = DDR短期 vs VR中期方向不同
+                                    ddf_cn = '空' if ddf_dir == 'bearish' else '多'
+                                    vr_cn = '多' if vr_dir == 'bullish' else '空'
+                                    tech_1h_label = f" | ⏱️短{ddf_cn}→中{vr_cn}"
                             
-                            # 冲突时边框闪烁黄色
+                            # 1h WT交叉验证(针对有信号的股票)
+                            active_dir = ddf_dir or vr_dir
+                            if wt1_1h is not None and active_dir:
+                                if active_dir == 'bullish' and wt1_1h >= 60:
+                                    tech_1h_conflict = True
+                                    tech_1h_label += f" ⛔1hWT{wt1_1h:.0f}超买"
+                                elif active_dir == 'bearish' and wt1_1h <= -60:
+                                    tech_1h_conflict = True
+                                    tech_1h_label += f" ⛔1hWT{wt1_1h:.0f}超卖"
+                            
+                            # Options Impact标注
+                            oi_label = ""
+                            if oi_val is not None:
+                                if oi_val > 30:
+                                    oi_label = f" | OI:{oi_val:.0f}%🔴期权主导"
+                                elif oi_val > 15:
+                                    oi_label = f" | OI:{oi_val:.0f}%"
+                                elif oi_val < 5 and active_dir:
+                                    oi_label = f" | OI:{oi_val:.0f}%⚠️基本面主导"
+                            
+                            # 冲突时边框黄色
                             if tech_1h_conflict and (has_sig or vr_has_sig or ddf.get('signal_name')):
                                 border_color = "#ffaa00"
                             
                             with st.container():
                                 st.markdown(f"""
                                 <div style="border-left: 4px solid {border_color}; padding-left: 15px; margin: 10px 0; background-color: rgba(0,0,0,0.02);">
-                                <h4>{sig_icon} {symbol} - {new_gamma_env}Gamma | {sig_text}{ddf_label}{tech_1h_label}{gamma_alert}</h4>
+                                <h4>{sig_icon} {symbol} - {new_gamma_env}Gamma | {sig_text}{ddf_label}{oi_label}{tech_1h_label}{gamma_alert}</h4>
                                 </div>
                                 """, unsafe_allow_html=True)
                                 
@@ -9059,31 +9167,60 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                     for alert in alerts:
                                         st.markdown(alert)
                                 
-                                # 如果有信号，显示信号详情
+                                # 如果有信号，显示信号详情（带时间窗口标注）
                                 if has_sig or vr_has_sig:
-                                    # VR分类信号
+                                    # VR分类信号 (日内波段/T+1)
                                     if vr_has_sig:
                                         vr_dir_cn = '做多' if vr_sig['direction'] == 'bullish' else '做空'
-                                        g_note = '负Gamma→信号放大' if new_gamma_env == '负' else '正Gamma→信号压缩'
-                                        st.markdown(f"**🎯 {vr_sig['type']}类 {vr_dir_cn}** | {g_note}")
-                                        st.caption(f"驱动: {vr_sig['reason']}")
-                                        st.caption(f"MM: {vr_sig['mm_analysis']}")
+                                        g_note = '负Gamma→放大' if new_gamma_env == '负' else '正Gamma→压缩'
+                                        vr_color = "#00cc66" if vr_sig['direction'] == 'bullish' else "#ff4b4b"
+                                        
+                                        # Options Impact确认
+                                        oi_confirm = ""
+                                        oi_v = stock.get('Options_Impact')
+                                        if oi_v is not None:
+                                            if oi_v > 30:
+                                                oi_confirm = f"✅ OI={oi_v:.0f}%期权主导"
+                                            elif oi_v > 15:
+                                                oi_confirm = f"OI={oi_v:.0f}%适中"
+                                            elif oi_v < 5:
+                                                oi_confirm = f"⚠️ OI={oi_v:.0f}%低,基本面主导"
+                                        
+                                        st.markdown(f"""
+                                        <div style="border:2px solid {vr_color}; border-radius:10px; padding:12px; margin:8px 0; background:rgba(0,0,0,0.02);">
+                                        <h4 style="margin:0 0 6px 0;">🎯 {vr_sig['type']}类 {vr_dir_cn} <span style="color:#888; font-size:0.75em;">⏰日内波段/T+1 | {g_note} {oi_confirm}</span></h4>
+                                        <p style="margin:2px 0; font-size:0.9em;"><b>驱动:</b> {vr_sig['reason']}</p>
+                                        <p style="margin:2px 0; font-size:0.9em;"><b>MM:</b> {vr_sig['mm_analysis']}</p>
+                                        </div>
+                                        """, unsafe_allow_html=True)
                                     
                                     # A-I组合信号
                                     for sig in stock.get('Signals', []):
-                                        st.markdown(f"**{sig['name']}** ({sig['direction_cn']}) 准确率{sig['accuracy']}%")
-                                        st.caption(f"{sig['conditions']}")
+                                        sig_c = "#00cc66" if sig['direction'] == 'bullish' else "#ff4b4b"
+                                        st.markdown(f"""
+                                        <div style="border-left:3px solid {sig_c}; padding:6px 12px; margin:4px 0;">
+                                        <b>{sig['name']}</b> ({sig['direction_cn']}) 准确率{sig['accuracy']}% <span style="color:#888;">⏰开盘30min-1hr</span><br>
+                                        <span style="font-size:0.85em;">{sig['conditions']}</span>
+                                        </div>
+                                        """, unsafe_allow_html=True)
                                     
-                                    # 技术面确认
+                                    # 技术面确认 (日线 + 1h)
                                     sig_dir = vr_sig['direction'] if vr_has_sig else (stock['Signals'][0]['direction'] if stock.get('Signals') else None)
                                     if sig_dir and stock.get('WT1') is not None:
                                         tc = get_tech_confirmation_for_signal(sig_dir, stock['WT1'], stock.get('WT_Dir'), stock.get('RSI'))
                                         if tc['conflict']:
-                                            st.warning(f"⚠️ 技术冲突: {tc['reason']}")
+                                            st.warning(f"⚠️ 日线技术冲突: {tc['reason']}")
                                         elif '✅' in tc['status']:
-                                            st.success(f"✅ 技术确认: {tc['reason']}")
+                                            st.success(f"✅ 日线确认: {tc['reason']}")
                                         else:
-                                            st.info(f"➖ 待确认: {tc['reason']}")
+                                            st.info(f"➖ 日线待确认: {tc['reason']}")
+                                        # 1h确认
+                                        if stock.get('WT1_1h') is not None:
+                                            tc_1h = get_tech_confirmation_for_signal(sig_dir, stock['WT1_1h'], stock.get('WT_Dir_1h'), stock.get('RSI_1h'))
+                                            if tc_1h['conflict']:
+                                                st.warning(f"⚠️ 1h技术冲突: {tc_1h['reason']}")
+                                            elif '✅' in tc_1h['status']:
+                                                st.success(f"✅ 1h确认: {tc_1h['reason']}")
                                 
                                 # DDF做市商对冲方向 (所有股票都显示)
                                 ddf = stock.get('DDF', {})
