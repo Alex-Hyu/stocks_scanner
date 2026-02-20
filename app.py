@@ -9333,44 +9333,46 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                     if signals_list:
                         st.divider()
                         st.subheader("📊 三套信号追踪验证")
-                        st.caption("追踪A-I组合信号、VR A/B/C/D分类、DDF六大信号的准确率 | 对比前收→开盘15min/30min/收盘")
+                        st.caption("每套信号独立存储在Google Sheets，按交易日积累，长期统计准确率")
                         
-                        SIGNAL_TRACK_WS = "elite20_signal_track_v2"
+                        # 三套信号各自独立的worksheet
+                        WS_AI = "signal_track_ai"
+                        WS_VR = "signal_track_vr"
+                        WS_DDF = "signal_track_ddf"
                         
-                        track_tab1, track_tab2, track_tab3 = st.tabs(["📥 保存今日信号", "🔄 验证信号", "📈 准确率统计"])
+                        track_tab1, track_tab2, track_tab3, track_tab4 = st.tabs([
+                            "📥 保存今日信号", "🔄 验证信号", "📈 A-I组合", "📈 VR分类 | DDF模型"
+                        ])
                         
+                        # ====== Tab1: 保存信号 ======
                         with track_tab1:
-                            if st.button("📥 保存全部信号用于追踪", key="save_all_signals_v2"):
-                                track_data = load_worksheet_data(SIGNAL_TRACK_WS) or {}
-                                
-                                # CSV日期就是信号验证日（盘后数据描述当天走势）
-                                verify_date = data_date_elite
-                                verify_str = verify_date.strftime('%Y-%m-%d')
-                                
-                                # 基准价 = 前一交易日收盘价
+                            if st.button("📥 一键保存全部信号", key="save_all_signals_v3"):
+                                verify_str = data_date_str
                                 prev_date = data_date_elite - timedelta(days=1)
                                 while prev_date.weekday() >= 5:
                                     prev_date -= timedelta(days=1)
+                                prev_str = prev_date.strftime('%Y-%m-%d')
                                 
-                                save_count = 0
+                                ai_data = load_worksheet_data(WS_AI) or {}
+                                vr_data = load_worksheet_data(WS_VR) or {}
+                                ddf_data_ws = load_worksheet_data(WS_DDF) or {}
+                                
+                                counts = {'A-I': 0, 'VR': 0, 'DDF': 0}
+                                
                                 for stock in all_stocks_data:
                                     symbol = stock['Symbol']
-                                    # 获取前一交易日收盘价作为基准
                                     try:
                                         tk = yf.Ticker(symbol)
                                         hist = tk.history(period="10d")
                                         if hist.empty:
                                             continue
-                                        # 找前一交易日收盘
-                                        prev_str = prev_date.strftime('%Y-%m-%d')
                                         base_close = None
                                         for idx in hist.index:
                                             if idx.strftime('%Y-%m-%d') == prev_str:
                                                 base_close = float(hist.loc[idx, 'Close'])
                                                 break
                                         if base_close is None:
-                                            # fallback: CSV日期前最近的收盘价
-                                            before = hist[hist.index < pd.Timestamp(verify_date)]
+                                            before = hist[hist.index < pd.Timestamp(data_date_elite)]
                                             if not before.empty:
                                                 base_close = float(before['Close'].iloc[-1])
                                             else:
@@ -9378,250 +9380,208 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                     except:
                                         continue
                                     
-                                    # 系统1: A-I组合信号
-                                    for sig in stock.get('Signals', []):
-                                        key = f"{verify_str}_{symbol}_AI_{sig['signal_id']}"
-                                        if key not in track_data:
-                                            track_data[key] = {
-                                                'symbol': symbol, 'signal_date': data_date_str,
-                                                'predict_date': verify_str, 'system': 'A-I组合',
-                                                'signal': sig['name'], 'direction': sig['direction_cn'],
-                                                'conditions': sig['conditions'],
-                                                'base_close': base_close,
-                                                'open_15m': None, 'open_30m': None, 'day_close': None,
-                                                'result_15m': None, 'result_30m': None, 'result_close': None,
-                                                'verified': False
-                                            }
-                                            save_count += 1
+                                    base_rec = {
+                                        'symbol': symbol, 'date': verify_str,
+                                        'base_close': round(base_close, 2),
+                                        'open_15m': None, 'open_30m': None, 'day_close': None,
+                                        'chg_15m': None, 'chg_30m': None, 'chg_close': None,
+                                        'result_15m': None, 'result_30m': None, 'result_close': None,
+                                        'verified': False
+                                    }
                                     
-                                    # 系统2: VR A/B/C/D分类
+                                    for sig in stock.get('Signals', []):
+                                        key = f"{verify_str}_{symbol}_{sig['signal_id']}"
+                                        if key not in ai_data:
+                                            ai_data[key] = {**base_rec, 'signal': sig['name'],
+                                                'direction': sig['direction_cn'],
+                                                'conditions': sig['conditions'][:120]}
+                                            counts['A-I'] += 1
+                                    
                                     vr_sig = stock.get('VR_Signal', {})
                                     if vr_sig.get('type') and vr_sig.get('direction'):
-                                        vr_dir_cn = '做多' if vr_sig['direction'] == 'bullish' else '做空'
-                                        key = f"{verify_str}_{symbol}_VR_{vr_sig['type']}"
-                                        if key not in track_data:
-                                            track_data[key] = {
-                                                'symbol': symbol, 'signal_date': data_date_str,
-                                                'predict_date': verify_str, 'system': 'VR分类',
-                                                'signal': f"{vr_sig['type']}类{vr_dir_cn}",
-                                                'direction': vr_dir_cn,
-                                                'conditions': vr_sig.get('reason', ''),
-                                                'base_close': base_close,
-                                                'open_15m': None, 'open_30m': None, 'day_close': None,
-                                                'result_15m': None, 'result_30m': None, 'result_close': None,
-                                                'verified': False
-                                            }
-                                            save_count += 1
+                                        vr_dir = '做多' if vr_sig['direction'] == 'bullish' else '做空'
+                                        key = f"{verify_str}_{symbol}_{vr_sig['type']}"
+                                        if key not in vr_data:
+                                            vr_data[key] = {**base_rec, 'signal': f"{vr_sig['type']}类",
+                                                'direction': vr_dir,
+                                                'conditions': vr_sig.get('reason', '')[:120]}
+                                            counts['VR'] += 1
                                     
-                                    # 系统3: DDF信号
                                     ddf = stock.get('DDF', {})
                                     if ddf.get('signal_name'):
                                         ddf_dir = '做空' if '做空' in ddf.get('signal_detail', '') else '做多'
-                                        key = f"{verify_str}_{symbol}_DDF_{ddf['signal_name']}"
-                                        if key not in track_data:
-                                            track_data[key] = {
-                                                'symbol': symbol, 'signal_date': data_date_str,
-                                                'predict_date': verify_str, 'system': 'DDF模型',
+                                        key = f"{verify_str}_{symbol}_{ddf['signal_name']}"
+                                        if key not in ddf_data_ws:
+                                            ddf_data_ws[key] = {**base_rec,
                                                 'signal': f"{ddf.get('signal_icon','')}{ddf['signal_name']}",
                                                 'direction': ddf_dir,
-                                                'conditions': ddf.get('signal_detail', '')[:100],
-                                                'base_close': base_close,
-                                                'open_15m': None, 'open_30m': None, 'day_close': None,
-                                                'result_15m': None, 'result_30m': None, 'result_close': None,
-                                                'verified': False
-                                            }
-                                            save_count += 1
+                                                'conditions': ddf.get('signal_detail', '')[:120]}
+                                            counts['DDF'] += 1
                                 
-                                if save_worksheet_data(SIGNAL_TRACK_WS, track_data):
-                                    st.success(f"✅ 已保存 {save_count} 个信号 (验证日: {verify_str})")
-                                    
-                                    # 显示保存了什么
-                                    saved_today = [v for v in track_data.values() if v.get('signal_date') == data_date_str]
-                                    if saved_today:
-                                        sdf = pd.DataFrame(saved_today)
-                                        for sys_name in ['A-I组合', 'VR分类', 'DDF模型']:
-                                            subset = sdf[sdf['system'] == sys_name]
-                                            if not subset.empty:
-                                                st.caption(f"**{sys_name}**: {len(subset)}个")
+                                save_worksheet_data(WS_AI, ai_data)
+                                save_worksheet_data(WS_VR, vr_data)
+                                save_worksheet_data(WS_DDF, ddf_data_ws)
+                                st.success(f"✅ 已保存 (验证日{verify_str}): A-I {counts['A-I']}个 | VR {counts['VR']}个 | DDF {counts['DDF']}个")
                         
+                        # ====== Tab2: 验证信号 ======
                         with track_tab2:
-                            track_data = load_worksheet_data(SIGNAL_TRACK_WS) or {}
-                            if not track_data:
-                                st.info("暂无信号数据，请先保存信号")
-                            else:
-                                all_records = list(track_data.values())
-                                all_df = pd.DataFrame(all_records)
-                                
-                                if 'predict_date' in all_df.columns:
-                                    unverified_dates = sorted(all_df[all_df['verified'] == False]['predict_date'].dropna().unique(), reverse=True)
-                                    
-                                    if unverified_dates:
-                                        sel_date = st.selectbox("选择验证日期", unverified_dates, key="verify_date_v2")
-                                        
-                                        day_records = all_df[all_df['predict_date'] == sel_date]
-                                        st.info(f"📊 {sel_date}: {len(day_records)} 个信号待验证")
-                                        
-                                        if st.button("🔄 获取价格验证", key="verify_signals_v2"):
-                                            verified_count = 0
-                                            with st.spinner("获取K线数据..."):
-                                                symbols = day_records['symbol'].unique()
-                                                price_cache = {}
-                                                
-                                                for sym in symbols:
-                                                    try:
-                                                        tk = yf.Ticker(sym)
-                                                        # 日线获取收盘价
-                                                        hist_d = tk.history(period="10d")
-                                                        # 寻找验证日
-                                                        for idx, row_h in hist_d.iterrows():
-                                                            d_str = idx.strftime('%Y-%m-%d')
-                                                            if d_str == sel_date:
-                                                                price_cache[sym] = {'day_close': float(row_h['Close']), 'day_open': float(row_h['Open'])}
-                                                                break
-                                                        
-                                                        # 15分钟K线获取开盘15/30分钟
-                                                        hist_15m = tk.history(period="5d", interval="15m")
-                                                        if hist_15m is not None and not hist_15m.empty:
-                                                            day_bars = hist_15m[hist_15m.index.strftime('%Y-%m-%d') == sel_date]
-                                                            if len(day_bars) >= 2:
-                                                                if sym not in price_cache:
-                                                                    price_cache[sym] = {}
-                                                                price_cache[sym]['open_15m'] = float(day_bars.iloc[0]['Close'])  # 第1根15m bar收盘
-                                                                price_cache[sym]['open_30m'] = float(day_bars.iloc[1]['Close'])  # 第2根15m bar收盘
-                                                    except:
-                                                        pass
-                                                
-                                                # 逐条验证
-                                                for key, record in track_data.items():
-                                                    if record.get('predict_date') != sel_date or record.get('verified'):
-                                                        continue
-                                                    sym = record['symbol']
-                                                    if sym not in price_cache:
-                                                        continue
-                                                    
-                                                    pc = price_cache[sym]
-                                                    base = record['base_close']
-                                                    direction = record['direction']
-                                                    is_long = direction == '做多'
-                                                    
-                                                    def judge(price, base_p, is_l):
-                                                        if price is None or base_p is None:
-                                                            return None, None
-                                                        chg = (price - base_p) / base_p * 100
-                                                        if abs(chg) < 0.1:
-                                                            return round(chg, 2), '➖平'
-                                                        if is_l:
-                                                            return round(chg, 2), '✅' if chg > 0 else '❌'
-                                                        else:
-                                                            return round(chg, 2), '✅' if chg < 0 else '❌'
-                                                    
-                                                    p15 = pc.get('open_15m')
-                                                    p30 = pc.get('open_30m')
-                                                    p_close = pc.get('day_close')
-                                                    
-                                                    chg15, r15 = judge(p15, base, is_long)
-                                                    chg30, r30 = judge(p30, base, is_long)
-                                                    chg_c, r_c = judge(p_close, base, is_long)
-                                                    
-                                                    record['open_15m'] = p15
-                                                    record['open_30m'] = p30
-                                                    record['day_close'] = p_close
-                                                    record['chg_15m'] = chg15
-                                                    record['chg_30m'] = chg30
-                                                    record['chg_close'] = chg_c
-                                                    record['result_15m'] = r15
-                                                    record['result_30m'] = r30
-                                                    record['result_close'] = r_c
-                                                    record['verified'] = True
-                                                    verified_count += 1
-                                            
-                                            save_worksheet_data(SIGNAL_TRACK_WS, track_data)
-                                            st.success(f"✅ 已验证 {verified_count} 个信号")
-                                            st.rerun()
-                                    
-                                    # 显示已验证
-                                    verified_df = all_df[all_df['verified'] == True]
-                                    if not verified_df.empty:
-                                        for sys_name in ['A-I组合', 'VR分类', 'DDF模型']:
-                                            subset = verified_df[verified_df['system'] == sys_name]
-                                            if not subset.empty:
-                                                st.markdown(f"#### {sys_name}")
-                                                cols = ['symbol', 'signal', 'direction', 'base_close', 'open_15m', 'open_30m', 'day_close', 'result_15m', 'result_30m', 'result_close']
-                                                display = subset[[c for c in cols if c in subset.columns]].copy()
-                                                st.dataframe(display, hide_index=True, use_container_width=True)
+                            def verify_one_system(ws_name, sys_label):
+                                data = load_worksheet_data(ws_name) or {}
+                                if not data:
+                                    return 0
+                                unverified = {k: v for k, v in data.items() if not v.get('verified')}
+                                if not unverified:
+                                    return 0
+                                dates = set(v['date'] for v in unverified.values())
+                                verified_count = 0
+                                for dt in dates:
+                                    day_recs = {k: v for k, v in unverified.items() if v['date'] == dt}
+                                    symbols = set(v['symbol'] for v in day_recs.values())
+                                    price_cache = {}
+                                    for sym in symbols:
+                                        try:
+                                            tk = yf.Ticker(sym)
+                                            hist_15m = tk.history(period="5d", interval="15m")
+                                            if hist_15m is not None and not hist_15m.empty:
+                                                day_bars = hist_15m[hist_15m.index.strftime('%Y-%m-%d') == dt]
+                                                if len(day_bars) >= 2:
+                                                    price_cache[sym] = {
+                                                        'open_15m': float(day_bars.iloc[0]['Close']),
+                                                        'open_30m': float(day_bars.iloc[1]['Close'])}
+                                            hist_d = tk.history(period="10d")
+                                            if hist_d is not None and not hist_d.empty:
+                                                for idx_h in hist_d.index:
+                                                    if idx_h.strftime('%Y-%m-%d') == dt:
+                                                        if sym not in price_cache:
+                                                            price_cache[sym] = {}
+                                                        price_cache[sym]['day_close'] = float(hist_d.loc[idx_h, 'Close'])
+                                                        break
+                                        except:
+                                            pass
+                                    for key, rec in day_recs.items():
+                                        sym = rec['symbol']
+                                        if sym not in price_cache:
+                                            continue
+                                        pc = price_cache[sym]
+                                        base = rec['base_close']
+                                        is_long = rec['direction'] == '做多'
+                                        for pk, ck, rk in [('open_15m','chg_15m','result_15m'),
+                                                           ('open_30m','chg_30m','result_30m'),
+                                                           ('day_close','chg_close','result_close')]:
+                                            p = pc.get(pk)
+                                            if p is not None and base:
+                                                chg = round((p - base) / base * 100, 2)
+                                                res = '➖' if abs(chg) < 0.1 else ('✅' if (chg > 0) == is_long else '❌')
+                                                data[key][pk] = round(p, 2)
+                                                data[key][ck] = chg
+                                                data[key][rk] = res
+                                        data[key]['verified'] = True
+                                        verified_count += 1
+                                save_worksheet_data(ws_name, data)
+                                return verified_count
+                            
+                            if st.button("🔄 一键验证全部信号", key="verify_all_v3"):
+                                with st.spinner("获取K线数据验证中..."):
+                                    c1 = verify_one_system(WS_AI, "A-I")
+                                    c2 = verify_one_system(WS_VR, "VR")
+                                    c3 = verify_one_system(WS_DDF, "DDF")
+                                st.success(f"✅ A-I {c1}个 | VR {c2}个 | DDF {c3}个")
+                                st.rerun()
+                            
+                            for ws, label in [(WS_AI,"A-I组合"),(WS_VR,"VR分类"),(WS_DDF,"DDF模型")]:
+                                d = load_worksheet_data(ws) or {}
+                                total = len(d)
+                                unv = len([v for v in d.values() if not v.get('verified')])
+                                st.caption(f"**{label}**: 总{total}条 | 已验证{total-unv} | 待验证{unv}")
                         
+                        # ====== 准确率渲染函数 ======
+                        def render_accuracy_table(ws_name, sys_label):
+                            data = load_worksheet_data(ws_name) or {}
+                            if not data:
+                                st.info(f"{sys_label}: 暂无数据")
+                                return
+                            verified = [r for r in data.values() if r.get('verified')]
+                            if not verified:
+                                st.info(f"{sys_label}: 暂无已验证数据")
+                                return
+                            vdf = pd.DataFrame(verified)
+                            
+                            def calc_acc(df, col):
+                                if col not in df.columns: return 0, 0, 0
+                                valid = df[df[col].isin(['✅','❌'])]
+                                c = len(valid[valid[col]=='✅'])
+                                w = len(valid[valid[col]=='❌'])
+                                return c, w, c+w
+                            
+                            # 顶部总体准确率
+                            st.markdown(f"### {sys_label}")
+                            c15,w15,t15 = calc_acc(vdf,'result_15m')
+                            c30,w30,t30 = calc_acc(vdf,'result_30m')
+                            cc,wc,tc = calc_acc(vdf,'result_close')
+                            sc1,sc2,sc3,sc4 = st.columns(4)
+                            with sc1:
+                                st.metric("📊 总信号数", f"{len(verified)}")
+                            with sc2:
+                                a = c15/t15*100 if t15>0 else 0
+                                st.metric(f"15min {'🟢' if a>=70 else '🟡' if a>=50 else '🔴'}", f"{a:.1f}%", delta=f"{c15}✅ {w15}❌")
+                            with sc3:
+                                a = c30/t30*100 if t30>0 else 0
+                                st.metric(f"30min {'🟢' if a>=70 else '🟡' if a>=50 else '🔴'}", f"{a:.1f}%", delta=f"{c30}✅ {w30}❌")
+                            with sc4:
+                                a = cc/tc*100 if tc>0 else 0
+                                st.metric(f"收盘 {'🟢' if a>=70 else '🟡' if a>=50 else '🔴'}", f"{a:.1f}%", delta=f"{cc}✅ {wc}❌")
+                            
+                            st.divider()
+                            
+                            # 按信号类型
+                            st.markdown("**按信号类型**")
+                            sig_rows = []
+                            for sn, grp in vdf.groupby('signal'):
+                                row = {'信号': sn, '次数': len(grp)}
+                                for tf, col in [('15min','result_15m'),('30min','result_30m'),('收盘','result_close')]:
+                                    c,w,t = calc_acc(grp, col)
+                                    row[tf] = f"{c/t*100:.0f}% ({c}/{t})" if t>0 else "-"
+                                sig_rows.append(row)
+                            if sig_rows:
+                                st.dataframe(pd.DataFrame(sig_rows), hide_index=True, use_container_width=True)
+                            
+                            # 按交易日
+                            st.markdown("**按交易日**")
+                            dates = sorted(vdf['date'].unique(), reverse=True)
+                            day_rows = []
+                            for dt in dates:
+                                day = vdf[vdf['date']==dt]
+                                row = {'日期': dt, '信号数': len(day)}
+                                for tf, col in [('15min','result_15m'),('30min','result_30m'),('收盘','result_close')]:
+                                    c,w,t = calc_acc(day, col)
+                                    row[tf] = f"{c/t*100:.0f}% ({c}/{t})" if t>0 else "-"
+                                day_rows.append(row)
+                            if day_rows:
+                                st.dataframe(pd.DataFrame(day_rows), hide_index=True, use_container_width=True)
+                            
+                            # 每日明细(最近10天)
+                            for dt in dates[:10]:
+                                day = vdf[vdf['date']==dt]
+                                c_d,w_d,t_d = calc_acc(day,'result_close')
+                                a_d = c_d/t_d*100 if t_d>0 else 0
+                                ic = '🟢' if a_d>=70 else ('🟡' if a_d>=50 else '🔴')
+                                with st.expander(f"{dt} | {len(day)}个信号 | 收盘{ic}{a_d:.0f}%"):
+                                    cols = ['symbol','signal','direction','base_close',
+                                            'open_15m','chg_15m','result_15m',
+                                            'open_30m','chg_30m','result_30m',
+                                            'day_close','chg_close','result_close']
+                                    disp = day[[c for c in cols if c in day.columns]].copy()
+                                    st.dataframe(disp, hide_index=True, use_container_width=True)
+                        
+                        # ====== Tab3: A-I准确率 ======
                         with track_tab3:
-                            track_data = load_worksheet_data(SIGNAL_TRACK_WS) or {}
-                            if not track_data:
-                                st.info("暂无数据")
-                            else:
-                                all_records = [v for v in track_data.values() if v.get('verified')]
-                                if not all_records:
-                                    st.info("暂无已验证信号")
-                                else:
-                                    vdf = pd.DataFrame(all_records)
-                                    
-                                    st.markdown("### 📈 三套信号准确率对比")
-                                    
-                                    for sys_name in ['A-I组合', 'VR分类', 'DDF模型']:
-                                        subset = vdf[vdf['system'] == sys_name]
-                                        if subset.empty:
-                                            continue
-                                        
-                                        st.markdown(f"#### {sys_name} ({len(subset)}个信号)")
-                                        
-                                        stats = {}
-                                        for tf, col in [('15min', 'result_15m'), ('30min', 'result_30m'), ('收盘', 'result_close')]:
-                                            if col in subset.columns:
-                                                valid = subset[subset[col].isin(['✅', '❌'])]
-                                                correct = len(valid[valid[col] == '✅'])
-                                                wrong = len(valid[valid[col] == '❌'])
-                                                total = correct + wrong
-                                                acc = correct / total * 100 if total > 0 else 0
-                                                stats[tf] = {'correct': correct, 'wrong': wrong, 'total': total, 'accuracy': acc}
-                                        
-                                        if stats:
-                                            sc1, sc2, sc3 = st.columns(3)
-                                            for (tf, s), col_st in zip(stats.items(), [sc1, sc2, sc3]):
-                                                with col_st:
-                                                    color = "🟢" if s['accuracy'] >= 70 else ("🟡" if s['accuracy'] >= 50 else "🔴")
-                                                    st.metric(f"{tf} {color}", f"{s['accuracy']:.1f}%", delta=f"{s['correct']}✅ {s['wrong']}❌")
-                                        
-                                        # 按信号类型分解
-                                        if 'signal' in subset.columns:
-                                            sig_groups = subset.groupby('signal')
-                                            rows = []
-                                            for sig_name, grp in sig_groups:
-                                                row = {'信号': sig_name, '次数': len(grp)}
-                                                for tf, col in [('15min', 'result_15m'), ('30min', 'result_30m'), ('收盘', 'result_close')]:
-                                                    if col in grp.columns:
-                                                        valid = grp[grp[col].isin(['✅', '❌'])]
-                                                        c = len(valid[valid[col] == '✅'])
-                                                        t = len(valid)
-                                                        row[f'{tf}准确率'] = f"{c/t*100:.0f}% ({c}/{t})" if t > 0 else "N/A"
-                                                rows.append(row)
-                                            if rows:
-                                                st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
-                                        
-                                        st.divider()
-                                    
-                                    # 总体对比
-                                    st.markdown("### 🏆 总体对比")
-                                    summary_rows = []
-                                    for sys_name in ['A-I组合', 'VR分类', 'DDF模型']:
-                                        subset = vdf[vdf['system'] == sys_name]
-                                        if subset.empty:
-                                            continue
-                                        row = {'信号系统': sys_name, '总信号数': len(subset)}
-                                        for tf, col in [('15min', 'result_15m'), ('30min', 'result_30m'), ('收盘', 'result_close')]:
-                                            if col in subset.columns:
-                                                valid = subset[subset[col].isin(['✅', '❌'])]
-                                                c = len(valid[valid[col] == '✅'])
-                                                t = len(valid)
-                                                row[f'{tf}'] = f"{c/t*100:.0f}% ({c}/{t})" if t > 0 else "N/A"
-                                        summary_rows.append(row)
-                                    if summary_rows:
-                                        st.dataframe(pd.DataFrame(summary_rows), hide_index=True, use_container_width=True)
+                            render_accuracy_table(WS_AI, "🎯 A-I组合信号")
+                        
+                        # ====== Tab4: VR + DDF准确率 ======
+                        with track_tab4:
+                            render_accuracy_table(WS_VR, "📊 VR A/B/C/D分类")
+                            st.markdown("---")
+                            render_accuracy_table(WS_DDF, "🏦 DDF六大信号")
                 
             except Exception as e:
                 st.error(f"❌ 处理失败: {e}")
