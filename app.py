@@ -9343,32 +9343,48 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                             if st.button("📥 保存全部信号用于追踪", key="save_all_signals_v2"):
                                 track_data = load_worksheet_data(SIGNAL_TRACK_WS) or {}
                                 
-                                # 预测日期(下一交易日)
-                                predict_date = data_date_elite + timedelta(days=1)
-                                while predict_date.weekday() >= 5:
-                                    predict_date += timedelta(days=1)
-                                predict_str = predict_date.strftime('%Y-%m-%d')
+                                # CSV日期就是信号验证日（盘后数据描述当天走势）
+                                verify_date = data_date_elite
+                                verify_str = verify_date.strftime('%Y-%m-%d')
+                                
+                                # 基准价 = 前一交易日收盘价
+                                prev_date = data_date_elite - timedelta(days=1)
+                                while prev_date.weekday() >= 5:
+                                    prev_date -= timedelta(days=1)
                                 
                                 save_count = 0
                                 for stock in all_stocks_data:
                                     symbol = stock['Symbol']
-                                    # 获取基准收盘价
+                                    # 获取前一交易日收盘价作为基准
                                     try:
                                         tk = yf.Ticker(symbol)
-                                        hist = tk.history(period="5d")
+                                        hist = tk.history(period="10d")
                                         if hist.empty:
                                             continue
-                                        base_close = float(hist['Close'].iloc[-1])
+                                        # 找前一交易日收盘
+                                        prev_str = prev_date.strftime('%Y-%m-%d')
+                                        base_close = None
+                                        for idx in hist.index:
+                                            if idx.strftime('%Y-%m-%d') == prev_str:
+                                                base_close = float(hist.loc[idx, 'Close'])
+                                                break
+                                        if base_close is None:
+                                            # fallback: CSV日期前最近的收盘价
+                                            before = hist[hist.index < pd.Timestamp(verify_date)]
+                                            if not before.empty:
+                                                base_close = float(before['Close'].iloc[-1])
+                                            else:
+                                                continue
                                     except:
                                         continue
                                     
                                     # 系统1: A-I组合信号
                                     for sig in stock.get('Signals', []):
-                                        key = f"{predict_str}_{symbol}_AI_{sig['signal_id']}"
+                                        key = f"{verify_str}_{symbol}_AI_{sig['signal_id']}"
                                         if key not in track_data:
                                             track_data[key] = {
                                                 'symbol': symbol, 'signal_date': data_date_str,
-                                                'predict_date': predict_str, 'system': 'A-I组合',
+                                                'predict_date': verify_str, 'system': 'A-I组合',
                                                 'signal': sig['name'], 'direction': sig['direction_cn'],
                                                 'conditions': sig['conditions'],
                                                 'base_close': base_close,
@@ -9382,11 +9398,11 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                     vr_sig = stock.get('VR_Signal', {})
                                     if vr_sig.get('type') and vr_sig.get('direction'):
                                         vr_dir_cn = '做多' if vr_sig['direction'] == 'bullish' else '做空'
-                                        key = f"{predict_str}_{symbol}_VR_{vr_sig['type']}"
+                                        key = f"{verify_str}_{symbol}_VR_{vr_sig['type']}"
                                         if key not in track_data:
                                             track_data[key] = {
                                                 'symbol': symbol, 'signal_date': data_date_str,
-                                                'predict_date': predict_str, 'system': 'VR分类',
+                                                'predict_date': verify_str, 'system': 'VR分类',
                                                 'signal': f"{vr_sig['type']}类{vr_dir_cn}",
                                                 'direction': vr_dir_cn,
                                                 'conditions': vr_sig.get('reason', ''),
@@ -9401,11 +9417,11 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                     ddf = stock.get('DDF', {})
                                     if ddf.get('signal_name'):
                                         ddf_dir = '做空' if '做空' in ddf.get('signal_detail', '') else '做多'
-                                        key = f"{predict_str}_{symbol}_DDF_{ddf['signal_name']}"
+                                        key = f"{verify_str}_{symbol}_DDF_{ddf['signal_name']}"
                                         if key not in track_data:
                                             track_data[key] = {
                                                 'symbol': symbol, 'signal_date': data_date_str,
-                                                'predict_date': predict_str, 'system': 'DDF模型',
+                                                'predict_date': verify_str, 'system': 'DDF模型',
                                                 'signal': f"{ddf.get('signal_icon','')}{ddf['signal_name']}",
                                                 'direction': ddf_dir,
                                                 'conditions': ddf.get('signal_detail', '')[:100],
@@ -9417,7 +9433,7 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                             save_count += 1
                                 
                                 if save_worksheet_data(SIGNAL_TRACK_WS, track_data):
-                                    st.success(f"✅ 已保存 {save_count} 个信号 (预测日: {predict_str})")
+                                    st.success(f"✅ 已保存 {save_count} 个信号 (验证日: {verify_str})")
                                     
                                     # 显示保存了什么
                                     saved_today = [v for v in track_data.values() if v.get('signal_date') == data_date_str]
