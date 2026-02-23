@@ -1207,7 +1207,7 @@ def parse_qqq_premarket_text(text):
     
     return result
 
-def analyze_qqq_nq(premarket_data, csv_data=None):
+def analyze_qqq_nq(premarket_data, csv_data=None, csv_data_prev=None):
     """分析QQQ/NQ数据，包含方向性分析和情景分析"""
     analysis = {
         'qqq': {},
@@ -1447,6 +1447,97 @@ def analyze_qqq_nq(premarket_data, csv_data=None):
                     dpi_5d_val = dpi_5d_val * 100
                 directional.append(f"• 5Day DPI {dpi_5d_val:.1f}%")
                 analysis['directional']['dpi_5d'] = dpi_5d_val
+        
+        # ===== PG/CG Ratio 分析 (T+1最强预测指标 r=+0.359) =====
+        qqq_put_gamma = csv_data.get('Put Gamma')
+        qqq_call_gamma = csv_data.get('Call Gamma')
+        if qqq_put_gamma is not None and qqq_call_gamma is not None:
+            pg_val = parse_number_safe(str(qqq_put_gamma))
+            cg_val = parse_number_safe(str(qqq_call_gamma))
+            if pg_val is not None and cg_val is not None:
+                pg_abs = abs(pg_val)
+                cg_abs = abs(cg_val)
+                if cg_abs > 0:
+                    pgcg = pg_abs / cg_abs
+                    analysis['directional']['pg_cg_ratio'] = pgcg
+                    analysis['directional']['put_gamma_abs'] = pg_abs
+                    analysis['directional']['call_gamma_abs'] = cg_abs
+                    
+                    if pgcg >= 2.0:
+                        directional.append(f"• 🔥 **PG/CG Ratio {pgcg:.2f} ≥ 2.0: 极度恐惧结构 → 强烈做多信号** (QQQ回测75%准确, r=+0.36)")
+                        analysis['directional']['pg_cg_signal'] = ('strong_bullish', pgcg)
+                    elif pgcg >= 1.6:
+                        directional.append(f"• 📈 **PG/CG Ratio {pgcg:.2f} ≥ 1.6: 恐惧结构偏多** (QQQ回测71%准确, r=+0.36)")
+                        analysis['directional']['pg_cg_signal'] = ('bullish', pgcg)
+                    elif pgcg >= 1.2:
+                        directional.append(f"• PG/CG Ratio {pgcg:.2f}: Put Gamma偏重，中性偏多")
+                        analysis['directional']['pg_cg_signal'] = ('neutral_bull', pgcg)
+                    elif pgcg < 0.8:
+                        directional.append(f"• 📉 **PG/CG Ratio {pgcg:.2f} < 0.8: Call Gamma主导 → 偏空信号**")
+                        analysis['directional']['pg_cg_signal'] = ('bearish', pgcg)
+                    else:
+                        directional.append(f"• PG/CG Ratio {pgcg:.2f}: 均衡")
+                        analysis['directional']['pg_cg_signal'] = ('neutral', pgcg)
+                    
+                    # T vs T-1 PG/CG变化
+                    if csv_data_prev is not None:
+                        prev_pg = parse_number_safe(str(csv_data_prev.get('Put Gamma', '')))
+                        prev_cg = parse_number_safe(str(csv_data_prev.get('Call Gamma', '')))
+                        if prev_pg is not None and prev_cg is not None:
+                            prev_pg_abs = abs(prev_pg)
+                            prev_cg_abs = abs(prev_cg)
+                            if prev_cg_abs > 0:
+                                prev_pgcg = prev_pg_abs / prev_cg_abs
+                                pgcg_chg = pgcg - prev_pgcg
+                                analysis['directional']['pg_cg_prev'] = prev_pgcg
+                                analysis['directional']['pg_cg_chg'] = pgcg_chg
+                                if abs(pgcg_chg) > 0.2:
+                                    chg_dir = "↑恐惧加重" if pgcg_chg > 0 else "↓恐惧缓和"
+                                    directional.append(f"  └ PG/CG变化: {prev_pgcg:.2f} → {pgcg:.2f} ({pgcg_chg:+.2f}) {chg_dir}")
+        
+        # ===== Garch Rank 分析 (T+3预测 r=+0.445) =====
+        qqq_garch = csv_data.get('Garch Rank')
+        if qqq_garch is not None:
+            garch_val = parse_number_safe(str(qqq_garch).replace('%', ''))
+            if garch_val is not None:
+                # 处理小数格式
+                if 0 < garch_val < 1:
+                    garch_val = garch_val * 100
+                analysis['directional']['garch_rank'] = garch_val
+                
+                # T vs T-1 变化
+                garch_chg = None
+                if csv_data_prev is not None:
+                    prev_garch = parse_number_safe(str(csv_data_prev.get('Garch Rank', '')).replace('%', ''))
+                    if prev_garch is not None:
+                        if 0 < prev_garch < 1:
+                            prev_garch = prev_garch * 100
+                        garch_chg = garch_val - prev_garch
+                        analysis['directional']['garch_prev'] = prev_garch
+                        analysis['directional']['garch_chg'] = garch_chg
+                
+                if garch_chg is not None:
+                    if garch_chg > 3.0:
+                        directional.append(f"• ⚡ **Garch Rank {garch_val:.1f}% (+{garch_chg:.1f}%): 恐慌急升 → T+3偏多** (r=+0.45, 80%准确)")
+                        analysis['directional']['garch_signal'] = ('strong_bullish_t3', garch_val)
+                    elif garch_chg > 2.0:
+                        directional.append(f"• 📈 **Garch Rank {garch_val:.1f}% (+{garch_chg:.1f}%): 波动率急升 → T+3偏多** (r=+0.45)")
+                        analysis['directional']['garch_signal'] = ('bullish_t3', garch_val)
+                    elif garch_chg > 1.0:
+                        directional.append(f"• Garch Rank {garch_val:.1f}% (+{garch_chg:.1f}%): 波动率上升")
+                        analysis['directional']['garch_signal'] = ('rising', garch_val)
+                    elif garch_chg < -2.0:
+                        directional.append(f"• ⚠️ **Garch Rank {garch_val:.1f}% ({garch_chg:+.1f}%): 波动率骤降 → T+3偏空**")
+                        analysis['directional']['garch_signal'] = ('bearish_t3', garch_val)
+                    elif garch_chg < -1.0:
+                        directional.append(f"• Garch Rank {garch_val:.1f}% ({garch_chg:+.1f}%): 波动率下降")
+                        analysis['directional']['garch_signal'] = ('falling', garch_val)
+                    else:
+                        directional.append(f"• Garch Rank {garch_val:.1f}% ({garch_chg:+.1f}%): 波动率稳定")
+                        analysis['directional']['garch_signal'] = ('stable', garch_val)
+                else:
+                    directional.append(f"• Garch Rank {garch_val:.1f}% (无前日对比)")
+                    analysis['directional']['garch_signal'] = ('no_prev', garch_val)
         
         analysis['directional']['items'] = directional
         
@@ -3693,7 +3784,7 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
             premarket_data = parse_qqq_premarket_text(premarket_text)
             
             # 分析（传入CSV数据）
-            analysis = analyze_qqq_nq(premarket_data, csv_data)
+            analysis = analyze_qqq_nq(premarket_data, csv_data, csv_data_prev)
             
             # 刷新盘前/盘中价格 + 技术指标
             col_ref1, col_ref2 = st.columns([1, 3])
@@ -4184,6 +4275,89 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                 directional = analysis['directional']
                 for item in directional.get('items', []):
                     st.markdown(item)
+                
+                # ===== PG/CG & Garch 结构面板 =====
+                pgcg_ratio = directional.get('pg_cg_ratio')
+                garch_rank = directional.get('garch_rank')
+                
+                if pgcg_ratio is not None or garch_rank is not None:
+                    st.markdown("---")
+                    st.markdown("#### 🔬 OI结构指标")
+                    
+                    col_s1, col_s2, col_s3, col_s4, col_s5, col_s6 = st.columns(6)
+                    
+                    with col_s1:
+                        if pgcg_ratio is not None:
+                            pgcg_chg = directional.get('pg_cg_chg')
+                            pgcg_delta = f"{pgcg_chg:+.2f}" if pgcg_chg is not None else None
+                            st.metric("PG/CG Ratio", f"{pgcg_ratio:.2f}", delta=pgcg_delta)
+                        else:
+                            st.metric("PG/CG Ratio", "N/A")
+                    
+                    with col_s2:
+                        if pgcg_ratio is not None:
+                            pg_cg_sig = directional.get('pg_cg_signal', ('', 0))
+                            if pg_cg_sig[0] == 'strong_bullish':
+                                st.markdown("🔥 **强烈做多**")
+                                st.caption("恐惧打满, MM空头已重")
+                            elif pg_cg_sig[0] == 'bullish':
+                                st.markdown("📈 **偏多信号**")
+                                st.caption("≥1.6阈值, 71%准确率")
+                            elif pg_cg_sig[0] == 'bearish':
+                                st.markdown("📉 **偏空信号**")
+                                st.caption("Call Gamma主导")
+                            else:
+                                st.caption("中性区间")
+                    
+                    with col_s3:
+                        pg_abs = directional.get('put_gamma_abs')
+                        if pg_abs is not None:
+                            if pg_abs >= 1e9:
+                                st.metric("|Put Gamma|", f"{pg_abs/1e9:.2f}B")
+                            else:
+                                st.metric("|Put Gamma|", f"{pg_abs/1e6:.0f}M")
+                        else:
+                            st.metric("|Put Gamma|", "N/A")
+                    
+                    with col_s4:
+                        cg_abs = directional.get('call_gamma_abs')
+                        if cg_abs is not None:
+                            if cg_abs >= 1e9:
+                                st.metric("|Call Gamma|", f"{cg_abs/1e9:.2f}B")
+                            else:
+                                st.metric("|Call Gamma|", f"{cg_abs/1e6:.0f}M")
+                        else:
+                            st.metric("|Call Gamma|", "N/A")
+                    
+                    with col_s5:
+                        if garch_rank is not None:
+                            garch_chg = directional.get('garch_chg')
+                            garch_delta = f"{garch_chg:+.1f}%" if garch_chg is not None else None
+                            st.metric("Garch Rank", f"{garch_rank:.1f}%", delta=garch_delta)
+                        else:
+                            st.metric("Garch Rank", "N/A")
+                    
+                    with col_s6:
+                        garch_sig = directional.get('garch_signal', ('', 0))
+                        if garch_sig[0] in ('strong_bullish_t3', 'bullish_t3'):
+                            st.markdown("⚡ **T+3偏多**")
+                            st.caption(f"恐慌急升→均值回归")
+                        elif garch_sig[0] == 'bearish_t3':
+                            st.markdown("⚠️ **T+3偏空**")
+                            st.caption("波动骤降→缺乏动能")
+                        elif garch_sig[0] in ('rising', 'falling'):
+                            chg_v = directional.get('garch_chg', 0)
+                            st.caption(f"{'波动↑' if chg_v > 0 else '波动↓'}")
+                        else:
+                            st.caption("波动率稳定")
+                    
+                    # PG/CG + Garch共振提醒
+                    pgcg_sig = directional.get('pg_cg_signal', ('', 0))
+                    garch_sig = directional.get('garch_signal', ('', 0))
+                    if pgcg_sig[0] in ('strong_bullish', 'bullish') and garch_sig[0] in ('strong_bullish_t3', 'bullish_t3'):
+                        st.success("🔥 **PG/CG + Garch 双重恐惧信号共振！** T+1偏多(PG/CG) + T+3偏多(Garch) = 短线+中线均看涨")
+                    elif pgcg_sig[0] == 'bearish' and garch_sig[0] == 'bearish_t3':
+                        st.error("⚠️ **PG/CG + Garch 双重偏空！** Call Gamma主导 + 波动率骤降 = 缺乏做多动能")
                 
                 st.divider()
             
