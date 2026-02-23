@@ -8486,6 +8486,9 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                             'options_impact': parse_number_safe(row.get('Options Impact')),
                             'previous_close': parse_number_safe(row.get('Previous Close')),
                             'stock_volume': parse_number_safe(row.get('Stock Volume')),
+                            'call_gamma': parse_number_safe(row.get('Call Gamma')),
+                            'put_gamma': parse_number_safe(row.get('Put Gamma')),
+                            'garch_rank': parse_number_safe(row.get('Garch Rank')),
                         })
                     
                     today_data = pd.DataFrame(parsed_data)
@@ -8663,6 +8666,12 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                 'NE_Skew': ne_skew,
                                 'NE_Skew_Chg': ne_skew_chg,
                                 'Options_Impact': row.get('options_impact'),
+                                'Call_Gamma': row.get('call_gamma'),
+                                'Put_Gamma': row.get('put_gamma'),
+                                'Garch_Rank': row.get('garch_rank'),
+                                'Prev_Call_Gamma': prev.get('call_gamma'),
+                                'Prev_Put_Gamma': prev.get('put_gamma'),
+                                'Prev_Garch_Rank': prev.get('garch_rank'),
                                 'WT1': tech.get('WT1') if tech else None,
                                 'WT_Dir': tech.get('WT_Dir') if tech else None,
                                 'WT_Status': tech.get('WT_Status') if tech else None,
@@ -8738,6 +8747,41 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                             st.metric("✅ 技术确认", confirmed_count)
                         with col_stat4:
                             st.metric("➖ 无信号", no_signal_count)
+                        
+                        # ========== 🔬 PG/CG & Garch 结构提醒面板 ==========
+                        pgcg_alerts = []
+                        garch_alerts = []
+                        for stock in all_stocks_data:
+                            pg_raw = stock.get('Call_Gamma')  # stored raw from CSV
+                            cg_raw = stock.get('Put_Gamma')
+                            # Recalculate from raw fields
+                            pg_v = abs(stock.get('Put_Gamma')) if stock.get('Put_Gamma') else None
+                            cg_v = abs(stock.get('Call_Gamma')) if stock.get('Call_Gamma') else None
+                            ratio = (pg_v / cg_v) if (pg_v and cg_v and cg_v > 0) else None
+                            if ratio is not None and ratio >= 1.6:
+                                level = "🔥≥2.0" if ratio >= 2.0 else "📈≥1.6"
+                                pgcg_alerts.append(f"**{stock['Symbol']}** PG/CG={ratio:.2f} {level}")
+                            elif ratio is not None and ratio < 0.8:
+                                pgcg_alerts.append(f"**{stock['Symbol']}** PG/CG={ratio:.2f} 📉偏空")
+                            
+                            g_now = stock.get('Garch_Rank')
+                            g_prev = stock.get('Prev_Garch_Rank')
+                            if g_now is not None and g_prev is not None:
+                                g_chg = g_now - g_prev
+                                if g_chg > 2.0:
+                                    garch_alerts.append(f"**{stock['Symbol']}** Garch {g_prev:.1f}%→{g_now:.1f}% (⚡+{g_chg:.1f}% 恐慌急升)")
+                                elif g_chg < -2.0:
+                                    garch_alerts.append(f"**{stock['Symbol']}** Garch {g_prev:.1f}%→{g_now:.1f}% (⚠️{g_chg:+.1f}% 骤降)")
+                        
+                        if pgcg_alerts or garch_alerts:
+                            st.divider()
+                            st.subheader("🔬 OI结构提醒")
+                            st.caption("PG/CG≥1.6: Put Gamma主导，恐惧结构偏多(QQQ r=+0.36, 71%准确率) | Garch变化>2%: T+3方向信号(r=+0.45)")
+                            if pgcg_alerts:
+                                st.markdown("**PG/CG Ratio 极端值:** " + " | ".join(pgcg_alerts))
+                            if garch_alerts:
+                                st.markdown("**Garch Rank 异动:** " + " | ".join(garch_alerts))
+                        
                         
                         # ========== 🏦 DDF 四大交易信号面板 ==========
                         ddf_signal_stocks = [s for s in all_stocks_data if s.get('DDF', {}).get('signal_name')]
@@ -9036,10 +9080,23 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                             if tech_1h_conflict and (has_sig or vr_has_sig or ddf.get('signal_name')):
                                 border_color = "#ffaa00"
                             
+                            # PG/CG快速标签 (在标题栏显示)
+                            pgcg_header = ""
+                            _pg = abs(stock.get('Put_Gamma')) if stock.get('Put_Gamma') else None
+                            _cg = abs(stock.get('Call_Gamma')) if stock.get('Call_Gamma') else None
+                            _pgcg = (_pg / _cg) if (_pg and _cg and _cg > 0) else None
+                            if _pgcg is not None:
+                                if _pgcg >= 2.0:
+                                    pgcg_header = f" | 🔥PG/CG={_pgcg:.2f}"
+                                elif _pgcg >= 1.6:
+                                    pgcg_header = f" | 📈PG/CG={_pgcg:.2f}"
+                                elif _pgcg < 0.8:
+                                    pgcg_header = f" | 📉PG/CG={_pgcg:.2f}"
+                            
                             with st.container():
                                 st.markdown(f"""
                                 <div style="border-left: 4px solid {border_color}; padding-left: 15px; margin: 10px 0; background-color: rgba(0,0,0,0.02);">
-                                <h4>{sig_icon} {symbol} - {new_gamma_env}Gamma | {sig_text}{ddf_label}{oi_label}{tech_1h_label}{gamma_alert}</h4>
+                                <h4>{sig_icon} {symbol} - {new_gamma_env}Gamma | {sig_text}{ddf_label}{pgcg_header}{oi_label}{tech_1h_label}{gamma_alert}</h4>
                                 </div>
                                 """, unsafe_allow_html=True)
                                 
@@ -9098,7 +9155,95 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                     rsi_delta = f"1h:{rsi_h:.0f}" if rsi_h is not None else None
                                     st.metric("RSI(日)", rsi_str, delta=rsi_delta)
                                 
-                                # 第三行：DPI和NE Skew先行指标
+                                # 第三行：PG/CG Ratio + Garch Rank 结构指标
+                                put_gamma_val = stock.get('Put_Gamma')
+                                call_gamma_val = stock.get('Call_Gamma')
+                                garch_val = stock.get('Garch_Rank')
+                                prev_garch = stock.get('Prev_Garch_Rank')
+                                prev_put_gamma = stock.get('Prev_Put_Gamma')
+                                prev_call_gamma = stock.get('Prev_Call_Gamma')
+                                
+                                # 计算PG/CG
+                                pg_abs = abs(put_gamma_val) if put_gamma_val else None
+                                cg_abs = abs(call_gamma_val) if call_gamma_val else None
+                                pg_cg_ratio = (pg_abs / cg_abs) if (pg_abs and cg_abs and cg_abs > 0) else None
+                                
+                                # 前一天PG/CG
+                                prev_pg_abs = abs(prev_put_gamma) if prev_put_gamma else None
+                                prev_cg_abs = abs(prev_call_gamma) if prev_call_gamma else None
+                                prev_pg_cg = (prev_pg_abs / prev_cg_abs) if (prev_pg_abs and prev_cg_abs and prev_cg_abs > 0) else None
+                                pg_cg_chg = (pg_cg_ratio - prev_pg_cg) if (pg_cg_ratio is not None and prev_pg_cg is not None) else None
+                                
+                                # Garch变化
+                                garch_chg = (garch_val - prev_garch) if (garch_val is not None and prev_garch is not None) else None
+                                
+                                # 判断PG/CG信号级别
+                                pg_cg_alert = ""
+                                pg_cg_color = ""
+                                if pg_cg_ratio is not None:
+                                    if pg_cg_ratio >= 2.0:
+                                        pg_cg_alert = "🔥强烈做多"
+                                        pg_cg_color = "color:red;font-weight:bold"
+                                    elif pg_cg_ratio >= 1.6:
+                                        pg_cg_alert = "📈偏多"
+                                        pg_cg_color = "color:orange;font-weight:bold"
+                                    elif pg_cg_ratio < 0.8:
+                                        pg_cg_alert = "📉偏空"
+                                        pg_cg_color = "color:green"
+                                
+                                # 判断Garch信号
+                                garch_alert = ""
+                                if garch_chg is not None:
+                                    if garch_chg > 2.0:
+                                        garch_alert = "⚡恐慌急升(T+3偏多)"
+                                    elif garch_chg > 1.0:
+                                        garch_alert = "📈波动↑"
+                                    elif garch_chg < -2.0:
+                                        garch_alert = "⚠️波动骤降(T+3偏空)"
+                                    elif garch_chg < -1.0:
+                                        garch_alert = "📉波动↓"
+                                
+                                # 只在有数据时显示这一行
+                                if pg_cg_ratio is not None or garch_val is not None:
+                                    col1, col2, col3, col4, col5, col6 = st.columns(6)
+                                    with col1:
+                                        if pg_cg_ratio is not None:
+                                            pg_cg_delta = f"{pg_cg_chg:+.2f}" if pg_cg_chg is not None else ""
+                                            st.metric("PG/CG", f"{pg_cg_ratio:.2f}", delta=pg_cg_delta)
+                                        else:
+                                            st.metric("PG/CG", "N/A")
+                                    with col2:
+                                        if pg_cg_alert:
+                                            st.markdown(f"<span style='{pg_cg_color}'>{pg_cg_alert}</span>", unsafe_allow_html=True)
+                                            if pg_cg_ratio >= 1.6:
+                                                st.caption(f"QQQ≥1.6→71%做多 r=+0.36")
+                                    with col3:
+                                        if pg_abs is not None:
+                                            if pg_abs >= 1e9:
+                                                st.metric("|PG|", f"{pg_abs/1e9:.1f}B")
+                                            else:
+                                                st.metric("|PG|", f"{pg_abs/1e6:.0f}M")
+                                        else:
+                                            st.metric("|PG|", "N/A")
+                                    with col4:
+                                        if cg_abs is not None:
+                                            if cg_abs >= 1e9:
+                                                st.metric("|CG|", f"{cg_abs/1e9:.1f}B")
+                                            else:
+                                                st.metric("|CG|", f"{cg_abs/1e6:.0f}M")
+                                        else:
+                                            st.metric("|CG|", "N/A")
+                                    with col5:
+                                        if garch_val is not None:
+                                            garch_delta = f"{garch_chg:+.2f}%" if garch_chg is not None else ""
+                                            st.metric("Garch", f"{garch_val:.2f}%", delta=garch_delta)
+                                        else:
+                                            st.metric("Garch", "N/A")
+                                    with col6:
+                                        if garch_alert:
+                                            st.markdown(f"**{garch_alert}**")
+                                
+                                # 第四行：DPI和NE Skew先行指标
                                 with st.expander("📊 先行指标详情", expanded=has_sig):
                                     col1, col2, col3, col4 = st.columns(4)
                                     
