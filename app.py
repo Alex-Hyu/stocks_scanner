@@ -44,6 +44,14 @@ GSHEETS_CREDENTIALS_FILE = "./google_credentials.json"  # 你的API凭证文件
 GSHEETS_SPREADSHEET_NAME = "SpotGamma_Tracking"  # Google Sheets文档名称
 GSHEETS_WORKSHEET_NAME = "tracking_data"  # 工作表名称
 
+# 精选追踪清单（Equity Hub / 日内多空 / 精选追踪共用）
+TRACKING_WATCHLIST = [
+    'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META', 'NVDA', 'TSLA',
+    'AMD', 'SMCI', 'ARM', 'COIN', 'MSTR', 'PLTR', 'CRWD', 'NFLX',
+    'CRM', 'SNOW', 'MU', 'AVGO', 'HOOD',
+    'SPY', 'SPX', 'VIX', 'GLD', 'SLV', 'IWM', 'SMH', 'XLE', 'XLU', 'XLF'
+]
+
 # ============================================================
 # 常量定义
 # ============================================================
@@ -5361,6 +5369,19 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                 
                 st.success(f"✅ 已加载 {len(intraday_df)} 只标的")
                 
+                # 追踪清单筛选
+                ticker_col = 'Ticker' if 'Ticker' in intraday_df.columns else 'Symbol'
+                intra_filter_mode = st.radio(
+                    "标的范围", ["📋 精选追踪 (30只)", "📊 全部标的"],
+                    horizontal=True, key="intra_filter_mode",
+                    help=f"精选追踪: {', '.join(TRACKING_WATCHLIST[:10])}..."
+                )
+                if intra_filter_mode.startswith("📋"):
+                    total_before = len(intraday_df)
+                    intraday_df = intraday_df[intraday_df[ticker_col].isin(TRACKING_WATCHLIST)]
+                    st.caption(f"筛选: {len(intraday_df)}/{total_before} 只匹配追踪清单")
+                
+                
                 # 显示可用字段
                 with st.expander("📋 检测到的数据字段"):
                     st.write(intraday_df.columns.tolist())
@@ -6769,6 +6790,17 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                     sg_df = pd.read_csv(uploaded_file)
                 
                 sg_df = sg_df.dropna(subset=['Symbol'])
+                
+                # 追踪清单筛选
+                eh_filter_mode = st.radio(
+                    "标的范围", ["📋 精选追踪 (30只)", "📊 全部标的"],
+                    horizontal=True, key="eh_filter_mode",
+                    help=f"精选追踪: {', '.join(TRACKING_WATCHLIST[:10])}..."
+                )
+                if eh_filter_mode.startswith("📋"):
+                    total_before = len(sg_df)
+                    sg_df = sg_df[sg_df['Symbol'].isin(TRACKING_WATCHLIST)]
+                    st.caption(f"筛选: {len(sg_df)}/{total_before} 只匹配追踪清单")
                 
                 # 处理Delta Ratio中的引号前缀
                 if 'Delta Ratio' in sg_df.columns:
@@ -8694,56 +8726,64 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                         if prev_dates:
                             prev_date = prev_dates[0]
                             has_prev = True
+                        else:
+                            st.warning(f"⚠️ 历史库有 {len(all_dates)} 天数据 ({all_dates[:5]}), 但无早于 {data_date_str} 的记录")
                     
                     signals_list = []
+                    all_stocks_data = []
                     
                     if has_prev:
                         st.info(f"📅 对比: {prev_date} → {data_date_str}")
-                        
-                        # 获取前一天各股票数据 (T-1)
-                        prev_data_dict = {}
+                    else:
+                        st.warning("⚠️ 历史库中无更早日期数据，无法计算VR/GR/DR变化量（PG/CG等绝对指标仍可用）")
+                    
+                    # 获取前一天各股票数据 (T-1) — 没有则为空字典
+                    prev_data_dict = {}
+                    if has_prev:
                         for k, v in elite_history.items():
                             if v.get('date') == prev_date:
                                 prev_data_dict[v.get('symbol')] = v
-                        
-                        # 获取前两天数据 (T-2) 用于DPI和NE Skew变化计算
-                        prev2_date = prev_dates[1] if len(prev_dates) > 1 else None
-                        prev2_data_dict = {}
-                        if prev2_date:
+                    
+                    # 获取前两天数据 (T-2) 用于DPI和NE Skew变化计算
+                    prev2_date = (prev_dates[1] if len(prev_dates) > 1 else None) if has_prev else None
+                    prev2_data_dict = {}
+                    if prev2_date:
+                        for k, v in elite_history.items():
+                            if v.get('date') == prev2_date:
+                                prev2_data_dict[v.get('symbol')] = v
+                    
+                    # 获取过去3天的先行指标历史（用于显示）
+                    indicator_history_dict = {}
+                    sorted_hist_dates = sorted(set([v.get('date') for v in elite_history.values() if v.get('date') and v.get('date') < data_date_str]), reverse=True)[:3] if elite_history else []
+                    
+                    for symbol in ELITE_20:
+                        indicator_history_dict[symbol] = []
+                        for d in sorted_hist_dates:
                             for k, v in elite_history.items():
-                                if v.get('date') == prev2_date:
-                                    prev2_data_dict[v.get('symbol')] = v
-                        
-                        # 获取过去3天的先行指标历史（用于显示）
-                        indicator_history_dict = {}  # symbol -> [{date, dpi, dpi_5d, ne_skew}, ...]
-                        sorted_hist_dates = sorted(set([v.get('date') for v in elite_history.values() if v.get('date') and v.get('date') < data_date_str]), reverse=True)[:3]
-                        
-                        for symbol in ELITE_20:
-                            indicator_history_dict[symbol] = []
-                            for d in sorted_hist_dates:
-                                for k, v in elite_history.items():
-                                    if v.get('date') == d and v.get('symbol') == symbol:
-                                        indicator_history_dict[symbol].append({
-                                            '日期': d[-5:],  # 只显示MM-DD
-                                            'DPI': f"{v.get('dpi'):.1f}%" if v.get('dpi') else "N/A",
-                                            '5Day DPI': f"{v.get('dpi_5d'):.1f}%" if v.get('dpi_5d') else "N/A",
-                                            'NE Skew': f"{v.get('ne_skew'):.2f}%" if v.get('ne_skew') else "N/A"
-                                        })
-                                        break
-                        
-                        # 兼容旧数据结构
-                        prev_dpi_dict = {}
-                        for symbol in ELITE_20:
-                            prev_dpi_dict[symbol] = []
-                            for d in sorted_hist_dates:
-                                for k, v in elite_history.items():
-                                    if v.get('date') == d and v.get('symbol') == symbol:
-                                        if v.get('dpi') is not None:
-                                            prev_dpi_dict[symbol].append({'date': d, 'dpi': v.get('dpi')})
-                                        break
-                        
-                        # 计算所有股票数据（不管有没有信号）
-                        all_stocks_data = []
+                                if v.get('date') == d and v.get('symbol') == symbol:
+                                    indicator_history_dict[symbol].append({
+                                        '日期': d[-5:],
+                                        'DPI': f"{v.get('dpi'):.1f}%" if v.get('dpi') else "N/A",
+                                        '5Day DPI': f"{v.get('dpi_5d'):.1f}%" if v.get('dpi_5d') else "N/A",
+                                        'NE Skew': f"{v.get('ne_skew'):.2f}%" if v.get('ne_skew') else "N/A"
+                                    })
+                                    break
+                    
+                    # 兼容旧数据结构
+                    prev_dpi_dict = {}
+                    for symbol in ELITE_20:
+                        prev_dpi_dict[symbol] = []
+                        for d in sorted_hist_dates:
+                            for k, v in elite_history.items():
+                                if v.get('date') == d and v.get('symbol') == symbol:
+                                    if v.get('dpi') is not None:
+                                        prev_dpi_dict[symbol].append({'date': d, 'dpi': v.get('dpi')})
+                                    break
+                    
+                    # 计算所有股票数据（不管有没有前一天数据）
+                    all_stocks_data = []
+                    
+                    if True:  # always build stock data
                         
                         for _, row in today_data.iterrows():
                             symbol = row['symbol']
@@ -9617,8 +9657,6 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                                             st.caption(f"T-1: Call={pcv:,.0f} Put={ppv:,.0f} | Δ Call={cv-pcv:+,.0f} Put={pv-ppv:+,.0f}")
                                 
                                 st.markdown("---")
-                    else:
-                        st.warning("⚠️ 需要保存历史数据才能计算变化量")
                     
                     # ========== 保存数据 ==========
                     st.divider()
@@ -9816,11 +9854,18 @@ NQ盘前现价__25587__，昨收__25646__，第二列为NQ的数值
                     def render_accuracy_table(ws_name, sys_label):
                         data = load_worksheet_data(ws_name) or {}
                         if not data:
-                            st.info(f"{sys_label}: 暂无数据")
+                            st.info(f"{sys_label}: 暂无数据 (worksheet: {ws_name})")
                             return
                         verified = [r for r in data.values() if r.get('verified')]
+                        unverified_count = len(data) - len(verified)
                         if not verified:
-                            st.info(f"{sys_label}: 暂无已验证数据")
+                            st.info(f"{sys_label}: 共{len(data)}条信号，但暂无已验证数据 (待验证{unverified_count}条)")
+                            # 显示未验证的信号明细
+                            if data:
+                                uv_list = [{'symbol': v.get('symbol',''), 'date': v.get('date',''), 
+                                           'signal': v.get('signal',''), 'direction': v.get('direction','')}
+                                          for v in data.values()]
+                                st.dataframe(pd.DataFrame(uv_list), hide_index=True, use_container_width=True)
                             return
                         vdf = pd.DataFrame(verified)
                         
