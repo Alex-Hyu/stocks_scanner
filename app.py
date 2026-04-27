@@ -1158,6 +1158,10 @@ def screen_single_stock(ticker: str, sector_flow_dict: dict = None) -> dict:
 # QQQ/NQ 盘前分析函数
 # ============================================================
 from three_factor_signal import render_three_factor_signal
+
+    uploaded = st.file_uploader("上传 QQQ 手动数据", type='csv')
+if uploaded:
+    render_three_factor_signal(st, csv_source=uploaded)
         
 def parse_qqq_premarket_text(text):
     """解析QQQ盘前粘贴数据"""
