@@ -1157,7 +1157,8 @@ def screen_single_stock(ticker: str, sector_flow_dict: dict = None) -> dict:
 # ============================================================
 # QQQ/NQ 盘前分析函数
 # ============================================================
-
+from three_factor_signal import render_three_factor_signal
+        
 def parse_qqq_premarket_text(text):
     """解析QQQ盘前粘贴数据"""
     import re
@@ -3721,6 +3722,7 @@ def main():
     # ========== Tab 1: QQQ/NQ盘前分析 ==========
     with tab1:
         st.header("📈 QQQ/NQ 盘前分析")
+        render_three_factor_signal(st)
         
         # 数据输入区
         col_input1, col_input2 = st.columns(2)
